@@ -5,6 +5,7 @@ import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SimklRewatchModelsTest {
@@ -111,6 +112,42 @@ class SimklRewatchModelsTest {
         assertEquals("completed", merged.single { it.rewatchId == 10 }.status)
         assertEquals("active", merged.single { it.rewatchId == 20 }.status)
     }
+
+    @Test
+    fun `ids-only deletion check keeps only sessions SIMKL still lists`() {
+        val kept = session(rewatchId = 10, simkl = 100)
+        val deleted = session(rewatchId = 20, simkl = 200)
+        val present = json.decodeFromString<SimklAllItemsResponse>(
+            """{"shows":[{"show":{"ids":{"simkl":100}},"is_rewatch":false},
+               {"show":{"ids":{"simkl":100}},"is_rewatch":true,"rewatch_id":10}]}""",
+        )
+
+        assertEquals(listOf(kept), listOf(kept, deleted).reconcileRewatchDeletions(present))
+    }
+
+    @Test
+    fun `ids-only deletion check cannot decide without session ids`() {
+        val sessions = listOf(session(rewatchId = 10, simkl = 100))
+        val noRewatchRows = json.decodeFromString<SimklAllItemsResponse>(
+            """{"shows":[{"show":{"ids":{"simkl":100}}}]}""",
+        )
+        val rowWithoutId = json.decodeFromString<SimklAllItemsResponse>(
+            """{"shows":[{"show":{"ids":{"simkl":100}},"is_rewatch":true}]}""",
+        )
+
+        assertNull(sessions.reconcileRewatchDeletions(noRewatchRows))
+        assertNull(sessions.reconcileRewatchDeletions(rowWithoutId))
+        assertEquals(emptyList(), emptyList<SimklRewatchSession>().reconcileRewatchDeletions(noRewatchRows))
+    }
+
+    private fun session(rewatchId: Int, simkl: Int) = SimklRewatchSession(
+        rewatchId = rewatchId,
+        kind = SimklRewatchKind.SHOW,
+        contentId = "simkl:$simkl",
+        title = "Show $simkl",
+        ids = SimklScrobbleRepository.SimklIds(simkl = simkl),
+        status = "active",
+    )
 
     @Test
     fun `activities exposes the exact top-level delta watermark`() {
