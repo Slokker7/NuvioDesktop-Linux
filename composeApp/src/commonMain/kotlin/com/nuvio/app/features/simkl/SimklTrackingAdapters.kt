@@ -130,11 +130,12 @@ internal object SimklScrobbleAdapter : TrackingScrobbler {
             SimklRewatchRepository.hasActiveRewatchFor(item)
 
         return when (action) {
-            // Every /scrobble call lands on the title's original watch; none can address a rewatch
-            // session. During a rewatch a start (and each progress refresh, which is a start) or a
-            // resumable stop therefore bumped the completed original back to the top of SIMKL's
-            // Recently Watched as "Seen All" over the rewatch entry, at every episode. Report them
-            // handled without sending anything; the finishing stop below is pinned to the session.
+            // No /scrobble call can address a rewatch session. During a rewatch the finishing stop is
+            // diverted below, so a plain start here opened a SIMKL playback session nothing ever
+            // stopped; per SIMKL's rewatch guide the next /scrobble/start "tidies up" such a stale
+            // session first, which matured it into a watch on the completed original — at every new
+            // episode, showing as "Seen All" over the rewatch. Report starts (including progress
+            // refreshes) and resumable stops handled without sending anything.
             TrackingScrobbleAction.START -> if (inActiveRewatch) {
                 TrackingScrobbleResult.Handled
             } else {
