@@ -759,6 +759,14 @@ object WatchedRepository {
             }.onFailure { e ->
                 log.e(e) { "Failed to push watched items" }
             }
+            // Separate from the primary push so a failure on either side cannot block the other.
+            if (shouldWriteSelectedLibraryHistory(remoteSync)) {
+                runCatching {
+                    mirrorHistoryToFloppy(ProfileRepository.activeProfileId, items, watched = true)
+                }.onFailure { e ->
+                    log.e(e) { "Failed to mirror watched items to Floppy" }
+                }
+            }
         }
     }
 
@@ -771,7 +779,54 @@ object WatchedRepository {
             }.onFailure { e ->
                 log.e(e) { "Failed to push watched item delete" }
             }
+            runCatching {
+                mirrorHistoryToFloppy(ProfileRepository.activeProfileId, items, watched = false)
+            }.onFailure { e ->
+                log.e(e) { "Failed to mirror watched item delete to Floppy" }
+            }
         }
+    }
+
+    /**
+     * Mirrors an explicit mark/unmark to Floppy when it is connected and enabled but is not the
+     * selected Library source (in which case the primary write already went there).
+     *
+     * A mark sends only concrete movies and episodes; a show-level marker has no mark route, and
+     * the episodes alongside it carry the change. An unmark keeps it: Floppy treats a show-level
+     * unmark as "delete the whole show", which is also the only signal a poster unmark sends when
+     * the show's episode list could not be loaded.
+     * Playback completion never reaches here — Floppy's scrobbler already records that.
+     */
+    private suspend fun mirrorHistoryToFloppy(
+        profileId: Int,
+        items: Collection<WatchedItem>,
+        watched: Boolean,
+    ) {
+        val floppyId = TrackingProviderId.YAMTRACK
+        if (selectedLibraryHistoryWriter()?.providerId == floppyId) return
+        if (!TrackingProviderRegistry.isAuthenticated(floppyId)) return
+        val writer = TrackingProviderRegistry.historyWriter(floppyId) ?: return
+        val targets = if (!watched) items else items.filterNot { item ->
+            !item.isEpisode && item.type.isSeriesLikeWatchedType()
+        }
+        if (targets.isEmpty()) return
+        val result = if (watched) {
+            writer.addToHistory(
+                profileId = profileId,
+                items = targets.map { item ->
+                    TrackingHistoryItem(
+                        media = item.toTrackingMediaReference(),
+                        watchedAtEpochMs = item.markedAtEpochMs,
+                    )
+                },
+            )
+        } else {
+            writer.removeFromHistory(
+                profileId = profileId,
+                items = targets.map(WatchedItem::toTrackingMediaReference),
+            )
+        }
+        result.warnIfIncomplete(floppyId, if (watched) "mark watched" else "unmark watched")
     }
 
     /**

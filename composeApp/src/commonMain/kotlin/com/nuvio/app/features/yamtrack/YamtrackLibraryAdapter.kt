@@ -49,7 +49,7 @@ internal object YamtrackLibraryAdapter : TrackingLibraryProvider {
         while (true) {
             val response = httpRequestRaw(
                 "GET",
-                "$baseUrl/api/v1/media?limit=$PAGE_SIZE&offset=$offset",
+                "$baseUrl/api/v1/media/?limit=$PAGE_SIZE&offset=$offset",
                 floppyLibraryHeaders(token),
                 "",
             )
@@ -97,8 +97,17 @@ internal object YamtrackLibraryAdapter : TrackingLibraryProvider {
 
     override fun find(contentId: String): LibraryItem? = state.items.firstOrNull { it.id == contentId }
 
-    override suspend fun membership(item: LibraryItem): Map<String, Boolean> =
-        mapOf(TAB_KEY to contains(item.id, item.type))
+    override suspend fun membership(item: LibraryItem): Map<String, Boolean> {
+        // Anime lives on a MAL row whose id never matches the catalog id being browsed, so the
+        // snapshot cannot answer for it — ask Floppy directly.
+        val credentials = YamtrackSettingsRepository.activeCredentials()
+        val anime = credentials?.let { item.resolveFloppyAnime() }
+        if (credentials != null && anime is YamtrackAnimeResolution.Entry) {
+            val (baseUrl, token) = credentials
+            return mapOf(TAB_KEY to isTracked(animeMediaUrl(baseUrl, anime.mal), floppyLibraryHeaders(token)))
+        }
+        return mapOf(TAB_KEY to contains(item.id, item.type))
+    }
 
     override fun toggledDefaultMembership(currentMembership: Map<String, Boolean>): Map<String, Boolean> =
         mapOf(TAB_KEY to (currentMembership[TAB_KEY] != true))
@@ -111,6 +120,16 @@ internal object YamtrackLibraryAdapter : TrackingLibraryProvider {
     ): TrackingMembershipResolution? {
         if (profileId != ProfileRepository.activeProfileId) return null
         val desired = desiredMembership[TAB_KEY] ?: return null
+        // Anime goes to its MAL row, the same entry watched-history writes use. Anime that cannot
+        // be pinned to one keeps the TV route below, as before.
+        YamtrackSettingsRepository.activeCredentials()?.let { (baseUrl, token) ->
+            val anime = item.resolveFloppyAnime()
+            if (anime is YamtrackAnimeResolution.Entry) {
+                applyAnimeMembership(baseUrl, floppyLibraryHeaders(token), anime.mal, desired)
+                refresh(TrackingRefreshIntent.INVALIDATED)
+                return TrackingMembershipResolution(providerId, TAB_KEY, TAB_KEY)
+            }
+        }
         val current = contains(item.id, item.type)
         if (desired == current) return TrackingMembershipResolution(providerId, TAB_KEY, TAB_KEY)
         val (baseUrl, token) = YamtrackSettingsRepository.activeCredentials()
@@ -119,14 +138,14 @@ internal object YamtrackLibraryAdapter : TrackingLibraryProvider {
         val response = if (desired) {
             httpRequestRaw(
                 "POST",
-                "$baseUrl/api/v1/media/${target.mediaType}",
+                "$baseUrl/api/v1/media/${target.mediaType}/",
                 floppyLibraryHeaders(token),
                 json.encodeToString(FloppyTrackRequest(target.source, target.id)),
             )
         } else {
             httpRequestRaw(
                 "DELETE",
-                "$baseUrl/api/v1/media/${target.mediaType}/${target.source}/${target.id}",
+                "$baseUrl/api/v1/media/${target.mediaType}/${target.source}/${target.id}/",
                 floppyLibraryHeaders(token),
                 "",
             )
@@ -137,6 +156,117 @@ internal object YamtrackLibraryAdapter : TrackingLibraryProvider {
         refresh(TrackingRefreshIntent.INVALIDATED)
         return TrackingMembershipResolution(providerId, TAB_KEY, TAB_KEY)
     }
+
+    /**
+     * Mirrors a library add/remove made against another Library source (e.g. SIMKL) onto Floppy.
+     *
+     * Adding tracks the title as Planning, but only when Floppy is not already tracking it: the
+     * collection POST always appends a new entry, so a watched title would otherwise gain a second,
+     * Planning one. Removing deletes the tracked item with all its entries, watched ones included —
+     * the same outcome as SIMKL's own library removal.
+     *
+     * Ids resolve the way watched-history writes do (tmdb first), so a library entry and a later
+     * mark-watched land on the same Floppy item rather than an imdb/tmdb pair of duplicates.
+     */
+    suspend fun mirrorMembership(item: LibraryItem, inLibrary: Boolean) {
+        val (baseUrl, token) = YamtrackSettingsRepository.activeCredentials() ?: return
+        val headers = floppyLibraryHeaders(token)
+        when (val anime = item.resolveFloppyAnime()) {
+            is YamtrackAnimeResolution.Entry -> return applyAnimeMembership(baseUrl, headers, anime.mal, inLibrary)
+            // Anime without a MAL entry is skipped: the TV route would file it as a duplicate
+            // TMDB show beside the Anime row that history writes use.
+            is YamtrackAnimeResolution.Unaddressable -> error("Floppy skipped anime ${item.name}: ${anime.reason}")
+            YamtrackAnimeResolution.NotAnime -> Unit
+        }
+        val target = item.resolveFloppyLibraryTarget() ?: error("Floppy could not resolve ${item.name}")
+        val mediaUrl = "$baseUrl/api/v1/media/${target.mediaType}/${target.source}/${target.id}/"
+        val response = when (floppyMembershipChange(isTracked(mediaUrl, headers), inLibrary)) {
+            FloppyMembershipChange.NONE -> return
+            FloppyMembershipChange.ADD -> httpRequestRaw(
+                "POST",
+                "$baseUrl/api/v1/media/${target.mediaType}/",
+                headers,
+                json.encodeToString(FloppyPlanRequest(target.source, target.id, status = 0)),
+            )
+            FloppyMembershipChange.REMOVE -> httpRequestRaw("DELETE", mediaUrl, headers, "")
+        }
+        if (response.status !in 200..299 && !(response.status == 404 && !inLibrary)) {
+            error("Floppy library mirror failed (${response.status}): ${response.body.take(200)}")
+        }
+    }
+
+    /** Anime lives on Floppy as a MAL row; adding needs an explicit starting `progress`. */
+    private suspend fun applyAnimeMembership(
+        baseUrl: String,
+        headers: Map<String, String>,
+        mal: String,
+        inLibrary: Boolean,
+    ) {
+        val mediaUrl = animeMediaUrl(baseUrl, mal)
+        val response = when (floppyMembershipChange(isTracked(mediaUrl, headers), inLibrary)) {
+            FloppyMembershipChange.NONE -> return
+            FloppyMembershipChange.ADD -> httpRequestRaw(
+                "POST",
+                "$baseUrl/api/v1/media/anime/",
+                headers,
+                json.encodeToString(FloppyAnimePlanRequest("mal", mal, status = 0, progress = 0)),
+            )
+            FloppyMembershipChange.REMOVE -> httpRequestRaw("DELETE", mediaUrl, headers, "")
+        }
+        if (response.status !in 200..299 && !(response.status == 404 && !inLibrary)) {
+            error("Floppy anime library update failed (${response.status}): ${response.body.take(200)}")
+        }
+    }
+
+    private suspend fun isTracked(mediaUrl: String, headers: Map<String, String>): Boolean {
+        val existing = httpRequestRaw("GET", mediaUrl, headers, "")
+        return existing.status in 200..299 && json.decodeFromString<FloppyTrackedFlag>(existing.body).tracked
+    }
+
+    private fun animeMediaUrl(baseUrl: String, mal: String) = "$baseUrl/api/v1/media/anime/mal/$mal/"
+
+    private suspend fun LibraryItem.resolveFloppyAnime(): YamtrackAnimeResolution =
+        YamtrackScrobbleRepository.resolveAnimeEntry(
+            contentType = type,
+            parentMetaId = id,
+            videoId = null,
+            title = name,
+            seasonNumber = null,
+            episodeNumber = null,
+            isAnime = type.equals("anime", ignoreCase = true),
+        )
+}
+
+internal enum class FloppyMembershipChange { NONE, ADD, REMOVE }
+
+/**
+ * What a library add/remove must do on Floppy given whether it already tracks the title.
+ *
+ * Adding a tracked title is a no-op rather than a POST: the collection POST always appends a new
+ * entry, so a watched title would gain a second, Planning one.
+ */
+internal fun floppyMembershipChange(tracked: Boolean, inLibrary: Boolean): FloppyMembershipChange = when {
+    tracked == inLibrary -> FloppyMembershipChange.NONE
+    inLibrary -> FloppyMembershipChange.ADD
+    else -> FloppyMembershipChange.REMOVE
+}
+
+private suspend fun LibraryItem.resolveFloppyLibraryTarget(): FloppyLibraryTarget? {
+    val mediaType = if (type.equals("movie", true)) "movie" else "tv"
+    val resolved = YamtrackScrobbleRepository.buildItem(
+        contentType = type,
+        parentMetaId = id,
+        videoId = null,
+        title = name,
+        episodeTitle = null,
+        seasonNumber = null,
+        episodeNumber = null,
+        isAnime = type.equals("anime", true),
+    )?.ids
+    resolved?.tmdb?.takeIf(String::isNotBlank)?.let { return FloppyLibraryTarget(mediaType, "tmdb", it) }
+    resolved?.imdb?.takeIf(String::isNotBlank)?.let { return FloppyLibraryTarget(mediaType, "imdb", it) }
+    resolved?.tvdb?.takeIf(String::isNotBlank)?.let { return FloppyLibraryTarget(mediaType, "tvdb", it) }
+    return toFloppyLibraryTarget()
 }
 
 private data class FloppyLibraryTarget(val mediaType: String, val source: String, val id: String)
@@ -152,6 +282,20 @@ private fun LibraryItem.toFloppyLibraryTarget(): FloppyLibraryTarget? {
 }
 
 @Serializable private data class FloppyTrackRequest(val source: String, @SerialName("media_id") val mediaId: String)
+/** Status 0 is Planning; stated explicitly rather than leaning on the endpoint's default. */
+@Serializable private data class FloppyPlanRequest(
+    val source: String,
+    @SerialName("media_id") val mediaId: String,
+    // No default: this Json omits defaulted fields, which would drop the status from the body.
+    val status: Int,
+)
+@Serializable private data class FloppyAnimePlanRequest(
+    val source: String,
+    @SerialName("media_id") val mediaId: String,
+    val status: Int,
+    val progress: Int,
+)
+@Serializable private data class FloppyTrackedFlag(val tracked: Boolean = false)
 @Serializable private data class FloppyLibraryPage(
     val pagination: FloppyLibraryPagination = FloppyLibraryPagination(),
     val results: List<FloppyTrackedMedia> = emptyList(),
@@ -181,6 +325,8 @@ private fun FloppyTrackedMedia.toLibraryItem(): LibraryItem? {
         "imdb" -> rawId
         "tmdb" -> "tmdb:$rawId"
         "tvdb" -> "tvdb:$rawId"
+        // Anime library adds land on MAL rows; without this they were tracked but never listed.
+        "mal" -> "mal:$rawId"
         else -> return null
     }
     return LibraryItem(
@@ -190,6 +336,7 @@ private fun FloppyTrackedMedia.toLibraryItem(): LibraryItem? {
         poster = item.image,
         imdbId = id.takeIf { it.startsWith("tt") },
         tmdbId = if (id.startsWith("tmdb:")) id.substringAfter(':').toIntOrNull() else null,
+        malId = if (id.startsWith("mal:")) id.substringAfter(':').toIntOrNull() else null,
         savedAtEpochMs = createdAt?.let(::parseTraktIsoDateTimeToEpochMs) ?: 0L,
     )
 }

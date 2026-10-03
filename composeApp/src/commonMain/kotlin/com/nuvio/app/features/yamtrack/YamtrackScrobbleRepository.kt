@@ -42,6 +42,22 @@ internal sealed interface YamtrackScrobbleItem {
     }
 }
 
+internal sealed interface YamtrackAnimeResolution {
+    /** Not anime (or a movie): the TMDB routes apply. */
+    data object NotAnime : YamtrackAnimeResolution
+
+    /** Anime, but no single MAL entry can be addressed. Floppy is skipped rather than guessed. */
+    data class Unaddressable(val reason: String) : YamtrackAnimeResolution
+
+    /** [episode] is in the MAL entry's own numbering, or null for a title-level action. */
+    data class Entry(
+        val mal: String,
+        val ids: YamtrackScrobbleRepository.YamtrackIds,
+        val title: String?,
+        val episode: Int?,
+    ) : YamtrackAnimeResolution
+}
+
 /**
  * The Yamtrack fork's generic scrobble endpoint (`POST {base}/api/v1/scrobble/`).
  *
@@ -123,6 +139,62 @@ internal object YamtrackScrobbleRepository {
             YamtrackScrobbleItem.Movie(ids = ids, title = title)
         }
     }
+
+    /**
+     * The Floppy Anime entry (a flat MyAnimeList row) a series or one of its episodes belongs to.
+     *
+     * Explicit anime writes go to that row rather than to a TMDB TV item. A scrobble carrying the
+     * entry's AniDB id is pinned to the right MAL row, and Floppy then takes `episode_number`
+     * verbatim as the row's progress — so the episode must be in the entry's own numbering
+     * ([TrackingCoordinateFamily.ENTRY_LOCAL]), never the franchise one: sending Sun & Moon's
+     * episode 139 as TMDB S22E47 set its progress to 47.
+     *
+     * Movies are left alone here (they keep the movie routes); only series-like content resolves.
+     */
+    suspend fun resolveAnimeEntry(
+        contentType: String,
+        parentMetaId: String,
+        videoId: String?,
+        title: String?,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        isAnime: Boolean,
+    ): YamtrackAnimeResolution {
+        val normalizedType = contentType.trim().lowercase()
+        if (normalizedType !in SERIES_LIKE_TYPES) return YamtrackAnimeResolution.NotAnime
+        val resolved = MediaIdResolver.resolve(
+            contentType = contentType,
+            parentMetaId = parentMetaId,
+            videoId = videoId,
+            title = title,
+            sourceSeasonNumber = seasonNumber,
+            sourceEpisodeNumber = episodeNumber,
+            isAnimeHint = isAnime || normalizedType == "anime",
+        )
+        if (!isAnime && !resolved.isAnime && normalizedType != "anime") return YamtrackAnimeResolution.NotAnime
+        val mal = resolved.mal ?: return YamtrackAnimeResolution.Unaddressable("no MyAnimeList id")
+        if (seasonNumber == null || episodeNumber == null) {
+            return YamtrackAnimeResolution.Entry(mal.toString(), resolved.toYamtrackIds(), title, episode = null)
+        }
+        if (resolved.anidb == null || !resolved.hasFranchiseScrobbleId) {
+            return YamtrackAnimeResolution.Unaddressable("no AniDB and TMDB/IMDb/TVDB id to pin MAL $mal")
+        }
+        val coordinates = resolved.projectScrobbleCoordinates(
+            family = TrackingCoordinateFamily.ENTRY_LOCAL,
+            sourceSeason = seasonNumber,
+            sourceEpisode = episodeNumber,
+            isAnime = true,
+        )
+        val episode = coordinates.episode
+        if (!coordinates.retainsNativeAnimeIds || coordinates.season != 1 || episode == null) {
+            return YamtrackAnimeResolution.Unaddressable(
+                "S${seasonNumber}E$episodeNumber does not map onto a single MyAnimeList entry",
+            )
+        }
+        return YamtrackAnimeResolution.Entry(mal.toString(), resolved.toYamtrackIds(), title, episode)
+    }
+
+    private val SERIES_LIKE_TYPES = setOf("series", "tv", "show", "tvshow", "anime")
 
     private suspend fun send(
         action: String,
