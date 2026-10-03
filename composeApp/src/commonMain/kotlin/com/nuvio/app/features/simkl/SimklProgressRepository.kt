@@ -304,7 +304,8 @@ internal object SimklProgressRepository {
      */
     private suspend fun watchingList(activities: SimklActivities?): SimklListCache {
         val profileId = ProfileRepository.activeProfileId
-        val cache = watchingCache?.takeIf { watchingCacheProfileId == profileId }
+        val cache = watchingCache
+            ?.takeIf { watchingCacheProfileId == profileId && SimklListCacheStore.isForCurrentAccount(it) }
             ?: SimklListCacheStore.load(profileId, WATCHING_LIST_CACHE_KEY).also {
                 watchingCache = it
                 watchingCacheProfileId = profileId

@@ -86,15 +86,26 @@ internal object SimklListCacheStore {
             ?.takeIf(String::isNotBlank)
             ?.let { runCatching { json.decodeFromString<SimklListCache>(it) }.getOrNull() }
             ?: return SimklListCache()
+        return if (isForCurrentAccount(cache)) cache else SimklListCache()
+    }
+
+    /**
+     * False only when both accounts are known and differ — a reconnect as another SIMKL user in
+     * the same profile, which no disconnect cleared. Checked on every use, not just on load, so a
+     * list already in memory is not carried across the switch either.
+     */
+    fun isForCurrentAccount(cache: SimklListCache): Boolean {
         val account = simklListCacheAccount()
-        return if (cache.account != null && account != null && cache.account != account) SimklListCache() else cache
+        return cache.account == null || account == null || cache.account == account
     }
 
     fun save(profileId: Int, key: String, cache: SimklListCache) {
         SimklListCacheStorage.savePayload(
             profileId,
             key,
-            json.encodeToString(cache.copy(account = cache.account ?: simklListCacheAccount())),
+            // The current account wins, so a list first saved before the username was known gets
+            // labelled as soon as it is.
+            json.encodeToString(cache.copy(account = simklListCacheAccount() ?: cache.account)),
         )
     }
 
@@ -115,11 +126,21 @@ internal object SimklDeletionCheck {
     private val mutex = Mutex()
     private var cachedFor: String? = null
     private var cached: SimklAllItemsResponse? = null
+    private var cachedAtMs = 0L
+
+    /**
+     * How long one answer serves the other lists. Long enough for every list to run its check in
+     * the same refresh wave; short enough that a list checking much later — say a screen first
+     * opened hours after the removal — reads what the user holds then, not what they held before
+     * titles were added since.
+     */
+    private const val SHARE_WINDOW_MS = 5L * 60L * 1000L
 
     suspend fun currentLibrary(removedStamp: String): SimklAllItemsResponse = mutex.withLock {
         val withRewatches = SimklRewatchRepository.requestsAllowed()
         val cacheKey = "${ProfileRepository.activeProfileId}|${simklListCacheAccount()}|$withRewatches|$removedStamp"
-        cached?.takeIf { cachedFor == cacheKey }?.let { return@withLock it }
+        val now = System.currentTimeMillis()
+        cached?.takeIf { cachedFor == cacheKey && now - cachedAtMs < SHARE_WINDOW_MS }?.let { return@withLock it }
         val query = if (withRewatches) "allow_rewatch=yes&extended=simkl_ids_only" else "extended=simkl_ids_only"
         val response = simklRequest(
             method = "GET",
@@ -135,6 +156,7 @@ internal object SimklDeletionCheck {
         log.i { "SIMKL deletion check: ${present.shows.size} shows, ${present.movies.size} movies, ${present.anime.size} anime" }
         cachedFor = cacheKey
         cached = present
+        cachedAtMs = now
         present
     }
 

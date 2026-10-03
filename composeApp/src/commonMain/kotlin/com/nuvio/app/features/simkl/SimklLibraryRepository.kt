@@ -165,7 +165,7 @@ internal object SimklLibraryRepository {
     }
 
     private fun cacheFor(profileId: Int): SimklListCache =
-        listCache?.takeIf { listCacheProfileId == profileId }
+        listCache?.takeIf { listCacheProfileId == profileId && SimklListCacheStore.isForCurrentAccount(it) }
             ?: SimklListCacheStore.load(profileId, PLAN_TO_WATCH_CACHE_KEY).also {
                 listCache = it
                 listCacheProfileId = profileId
