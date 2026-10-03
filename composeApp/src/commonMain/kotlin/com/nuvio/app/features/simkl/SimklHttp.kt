@@ -23,7 +23,10 @@ private const val MIN_WRITE_SPACING_MS = 1_000L
 private const val MAX_ATTEMPTS = 5
 private const val MAX_BACKOFF_MS = 60_000L
 
-/** `400 {"error":"RATE_LIMIT"}` is a ~20s per-user write lock, not a quota: retry shortly. */
+/**
+ * `400 {"error":"rate_limit"}` is a ~20s per-user write lock, not a quota: retry shortly. Matched
+ * case-insensitively — the sync guide shows it lower-case, older notes here had it upper-case.
+ */
 private const val WRITE_LOCK_RETRY_MS = 2_000L
 private const val WRITE_LOCK_MAX_RETRIES = 3
 
@@ -175,7 +178,7 @@ private suspend fun sendWithRetries(
                 if (SimklAuthRepository.recoverFromUnauthorized(tokenUsed)) continue
                 return response
             }
-            response.status == 400 && isWrite && response.body.contains("\"RATE_LIMIT\"") &&
+            response.status == 400 && isWrite && response.body.contains("\"rate_limit\"", ignoreCase = true) &&
                 writeLockRetries < WRITE_LOCK_MAX_RETRIES -> {
                 writeLockRetries++
                 delay(WRITE_LOCK_RETRY_MS)

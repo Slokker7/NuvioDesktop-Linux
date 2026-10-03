@@ -166,7 +166,8 @@ internal object SimklSettingsRepository {
     fun setTrackRewatches(enabled: Boolean) {
         state = state.copy(trackRewatches = enabled)
         persist(); publish()
-        if (enabled) SimklRewatchRepository.refreshAsync()
+        // Switching tracking on is the one user-initiated rewatch resync: re-read the baseline.
+        if (enabled) SimklRewatchRepository.refreshAsync(full = true)
     }
 
     fun setSimklContinueWatchingDaysCap(days: Int) {
