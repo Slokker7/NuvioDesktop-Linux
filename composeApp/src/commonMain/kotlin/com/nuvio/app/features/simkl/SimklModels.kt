@@ -128,6 +128,8 @@ internal data class SimklCategoryActivity(
     val watching: String? = null,
     val playback: String? = null,
     val completed: String? = null,
+    val hold: String? = null,
+    val dropped: String? = null,
     @SerialName("removed_from_list") val removedFromList: String? = null,
 )
 

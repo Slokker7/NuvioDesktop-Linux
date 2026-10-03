@@ -24,9 +24,6 @@ import kotlinx.serialization.json.Json
 private const val SIMKL_BASE_URL = "https://api.simkl.com"
 private const val MAX_REWATCH_SESSIONS_PER_ITEM = 50
 
-/** See [SimklRewatchRepository.refreshNow]. */
-private const val FULL_READ_MAX_AGE_MS = 24L * 60L * 60L * 1000L
-
 @Serializable
 internal enum class SimklRewatchKind { MOVIE, SHOW, ANIME }
 
@@ -71,7 +68,6 @@ internal object SimklRewatchRepository {
     private var sessions = mutableListOf<SimklRewatchSession>()
     private var lastActivitiesAt: String? = null
     private var lastRemovedStamp: String? = null
-    private var lastFullReadAtEpochMs = 0L
     private var loaded = false
 
     /**
@@ -94,7 +90,6 @@ internal object SimklRewatchRepository {
         sessions = stored?.sessions?.toMutableList() ?: mutableListOf()
         lastActivitiesAt = stored?.lastActivitiesAt
         lastRemovedStamp = stored?.lastRemovedStamp
-        lastFullReadAtEpochMs = stored?.lastFullReadAtEpochMs ?: 0L
         publish()
     }
 
@@ -104,7 +99,6 @@ internal object SimklRewatchRepository {
         sessions = mutableListOf()
         lastActivitiesAt = null
         lastRemovedStamp = null
-        lastFullReadAtEpochMs = 0L
         ensureLoaded()
     }
 
@@ -114,7 +108,6 @@ internal object SimklRewatchRepository {
         sessions = mutableListOf()
         lastActivitiesAt = null
         lastRemovedStamp = null
-        lastFullReadAtEpochMs = 0L
         SimklRewatchStorage.clearPayload()
         publish()
     }
@@ -124,12 +117,14 @@ internal object SimklRewatchRepository {
     }
 
     /**
-     * Phase 2 of SIMKL's sync guide: a delta (`date_from`) when activities moved, nothing when they
-     * did not. A delta only reports sessions that changed, never ones SIMKL deleted, so a full read
-     * replaces the stored set when [full] is asked for, when `removed_from_list` has moved since the
-     * last one, or when the last one is more than [FULL_READ_MAX_AGE_MS] old — the backstop for a
-     * deletion that moves no stamp this code knows about. This used to be a full read on every
-     * launch: the whole all-items payload, for a list that is almost always unchanged.
+     * SIMKL's two-phase sync. Phase 1 — the first read, or [full] — is the one `extended=full` read
+     * without `date_from`; SIMKL's all-items reference allows that payload only as a one-time
+     * baseline. After it, a delta (`date_from`) when activities moved, nothing when they did not.
+     *
+     * A delta never reports a session SIMKL deleted, so deletions are reconciled separately, as the
+     * sync guide prescribes: an `extended=simkl_ids_only` read diffed against the stored sessions,
+     * run only when `removed_from_list` moves ("your cue to run the check") and only while sessions
+     * are stored. This used to re-read the whole `extended=full` payload then, and at least daily.
      */
     suspend fun refreshNow(full: Boolean = false): Boolean {
         ensureLoaded()
@@ -142,10 +137,13 @@ internal object SimklRewatchRepository {
             val activities = SimklAuthRepository.fetchActivities()
                 ?: error("SIMKL activity state could not be read.")
             val removedStamp = simklRemovedFromListStamp(activities)
-            val needsFull = full ||
-                lastActivitiesAt.isNullOrBlank() ||
-                (removedStamp != null && removedStamp != lastRemovedStamp) ||
-                System.currentTimeMillis() - lastFullReadAtEpochMs > FULL_READ_MAX_AGE_MS
+            var needsFull = full || lastActivitiesAt.isNullOrBlank()
+            val needsDeletionCheck = !needsFull && sessions.isNotEmpty() &&
+                removedStamp != null && removedStamp != lastRemovedStamp
+            if (needsDeletionCheck && removedStamp != null && !reconcileDeletions(removedStamp)) {
+                // The ids-only answer could not say which sessions survive; fall back to one baseline.
+                needsFull = true
+            }
             val deltaFrom = lastActivitiesAt?.takeIf(String::isNotBlank)?.takeUnless { needsFull }
             if (deltaFrom != null && activities.all == deltaFrom) {
                 publish()
@@ -173,10 +171,7 @@ internal object SimklRewatchRepository {
                     sessions.mergeRewatchDelta(remote)
                 }
                 lastActivitiesAt = activities.all?.takeIf(String::isNotBlank) ?: lastActivitiesAt
-                if (deltaFrom == null) {
-                    lastFullReadAtEpochMs = System.currentTimeMillis()
-                    lastRemovedStamp = removedStamp ?: lastRemovedStamp
-                }
+                if (deltaFrom == null) lastRemovedStamp = removedStamp ?: lastRemovedStamp
                 persist()
                 publish()
             }
@@ -189,6 +184,29 @@ internal object SimklRewatchRepository {
                 errorMessage = error.message ?: "SIMKL rewatches could not be refreshed.",
             )
         }.getOrDefault(false)
+    }
+
+    /**
+     * Drops stored sessions SIMKL no longer has, from the shared ids-only library read (see
+     * [SimklDeletionCheck]). Returns false when the answer cannot decide that (see
+     * [reconcileRewatchDeletions]), leaving sessions as is.
+     */
+    private suspend fun reconcileDeletions(removedStamp: String): Boolean {
+        val present = SimklDeletionCheck.currentLibrary(removedStamp)
+        return mutex.withLock {
+            val kept = sessions.reconcileRewatchDeletions(present) ?: run {
+                log.w { "SIMKL rewatch deletion check: ids-only rows carried no session ids; doing a full read" }
+                return@withLock false
+            }
+            if (kept.size != sessions.size) {
+                log.i { "SIMKL rewatch deletion check: dropped ${sessions.size - kept.size} session(s) SIMKL no longer has" }
+            }
+            sessions = kept.toMutableList()
+            lastRemovedStamp = removedStamp
+            persist()
+            publish()
+            true
+        }
     }
 
     suspend fun startRewatch(item: MetaPreview): SimklRewatchStartResult {
@@ -402,6 +420,9 @@ internal object SimklRewatchRepository {
         return Result.failure(lastFailure ?: IllegalStateException("SIMKL rewatch update failed."))
     }
 
+    /** Whether `allow_rewatch=yes` may be sent at all: tracking on, connected, PRO or VIP. */
+    internal fun requestsAllowed(): Boolean = rewatchRequestsAllowed()
+
     private fun rewatchRequestsAllowed(): Boolean =
         SimklSettingsRepository.isRewatchTrackingEnabled() &&
             SimklAuthRepository.isAuthenticated.value &&
@@ -414,7 +435,6 @@ internal object SimklRewatchRepository {
                     sessions = sessions,
                     lastActivitiesAt = lastActivitiesAt,
                     lastRemovedStamp = lastRemovedStamp,
-                    lastFullReadAtEpochMs = lastFullReadAtEpochMs,
                 ),
             ),
         )
@@ -440,6 +460,23 @@ internal fun MutableList<SimklRewatchSession>.mergeRewatchDelta(
         }
         add(changed)
     }
+}
+
+/**
+ * The stored sessions an `extended=simkl_ids_only` + `allow_rewatch=yes` read still lists, matched
+ * by session id. Null when the read cannot decide: it lists no rewatch row at all (every session
+ * deleted, or the ids-only shape leaves `is_rewatch` out — indistinguishable), or a rewatch row
+ * without its `rewatch_id`. The caller then falls back to a full read rather than guess, because
+ * wrongly dropping an active session sends that rewatch's episodes back to the original watch.
+ */
+internal fun List<SimklRewatchSession>.reconcileRewatchDeletions(
+    present: SimklAllItemsResponse,
+): List<SimklRewatchSession>? {
+    if (isEmpty()) return this
+    val rows = (present.shows + present.movies + present.anime).filter { it.isRewatch || it.rewatchId != null }
+    if (rows.isEmpty() || rows.any { it.rewatchId == null }) return null
+    val presentIds = rows.mapNotNullTo(mutableSetOf(), SimklAllItemsEntry::rewatchId)
+    return filter { it.rewatchId in presentIds }
 }
 
 private fun MetaPreview.rewatchKind(): SimklRewatchKind {
@@ -550,7 +587,6 @@ private data class StoredRewatchPayload(
     val sessions: List<SimklRewatchSession> = emptyList(),
     val lastActivitiesAt: String? = null,
     val lastRemovedStamp: String? = null,
-    val lastFullReadAtEpochMs: Long = 0L,
 )
 
 /**

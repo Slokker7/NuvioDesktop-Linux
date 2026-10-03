@@ -4,6 +4,7 @@ import co.touchlab.kermit.Logger
 import com.nuvio.app.features.addons.RawHttpResponse
 import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.features.details.MetaDetailsRepository
+import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.trakt.parseTraktIsoDateTimeToEpochMs
 import com.nuvio.app.features.watched.WatchedRepository
 import com.nuvio.app.features.watchprogress.WatchProgressEntry
@@ -16,9 +17,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 
 internal const val WatchProgressSourceSimkl = "simkl_playback"
+
+/** [SimklListCacheStore] key of the watching list behind the up-next seeds. */
+private const val WATCHING_LIST_CACHE_KEY = "simkl_watching_list"
 
 data class SimklProgressUiState(
     val entries: List<WatchProgressEntry> = emptyList(),
@@ -45,18 +51,30 @@ internal object SimklProgressRepository {
      *
      * Watched-history seeds are derived from the show's `last_watched` marker, so clearing one from
      * the UI is not enough: the next refresh rebuilds it from the same marker (or straight out of
-     * [cachedWatchingSeeds], which the activities gate can serve for a long time). The removal is
+     * the stored watching list, which the activities gate can serve for a long time). The removal is
      * carried upstream as a history removal by `WatchedRepository`; this keeps the row out of the
      * projection until SIMKL reports a *newer* watch for it, which is what a genuine re-watch looks
-     * like. In memory only, like every other cache here — by the next launch the history removal
-     * has landed and the marker has moved.
+     * like. In memory only — by the next launch the history removal has landed and the marker has
+     * moved.
      */
     private val suppressedSeedsByVideoId = mutableMapOf<String, Long>()
 
     private var refreshJob: Job? = null
     private var loaded = false
-    private var cachedWatchingSeeds: List<WatchProgressEntry> = emptyList()
-    private var hasLoadedWatchingSeeds = false
+
+    /**
+     * Several callers run [refreshNow] directly. Overlapping runs each made the same requests; one
+     * at a time, the second finds the stamps the first saved and reads nothing.
+     */
+    private val fetchMutex = Mutex()
+
+    /** The watching list the seeds are derived from, for [watchingCacheProfileId]; see [SimklListCache]. */
+    private var watchingCache: SimklListCache? = null
+    private var watchingCacheProfileId: Int? = null
+
+    /** `/sync/playback` as of [cachedPlaybackStamp]; re-read only when the playback stamps move. */
+    private var cachedPlaybackSessions: List<SimklPlaybackSession>? = null
+    private var cachedPlaybackStamp: String? = null
 
     fun ensureLoaded() {
         if (loaded) return
@@ -75,7 +93,7 @@ internal object SimklProgressRepository {
             return
         }
         _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
-        runCatching { fetchAll() }.fold(
+        runCatching { fetchMutex.withLock { fetchAll() } }.fold(
             onSuccess = { entries ->
                 _uiState.value = SimklProgressUiState(
                     entries = entries,
@@ -98,8 +116,7 @@ internal object SimklProgressRepository {
 
     fun onProfileChanged() {
         loaded = false
-        cachedWatchingSeeds = emptyList()
-        hasLoadedWatchingSeeds = false
+        resetCaches()
         suppressedSeedsByVideoId.clear()
         _uiState.value = SimklProgressUiState()
     }
@@ -173,7 +190,6 @@ internal object SimklProgressRepository {
     /** See [suppressedSeedsByVideoId]. */
     fun suppressWatchedSeed(videoId: String, watchedAtEpochMs: Long) {
         suppressedSeedsByVideoId[videoId] = watchedAtEpochMs
-        cachedWatchingSeeds = cachedWatchingSeeds.withoutSuppressedSeeds()
     }
 
     suspend fun deleteSession(videoId: String) {
@@ -186,36 +202,36 @@ internal object SimklProgressRepository {
         if (sessionIdByVideoId[videoId] == sessionId) {
             sessionIdByVideoId.remove(videoId)
         }
+        cachedPlaybackSessions = cachedPlaybackSessions?.filterNot { it.id == sessionId }
         log.d { "SIMKL playback session $sessionId deleted for $videoId" }
     }
 
+    /** Called on disconnect: also forgets the stored watching list. */
     fun clearLocalState() {
         refreshJob?.cancel()
         loaded = false
-        cachedWatchingSeeds = emptyList()
-        hasLoadedWatchingSeeds = false
+        resetCaches()
+        SimklListCacheStore.clear(ProfileRepository.activeProfileId, WATCHING_LIST_CACHE_KEY)
         sessionIdByVideoId.clear()
         suppressedSeedsByVideoId.clear()
         _uiState.value = SimklProgressUiState()
     }
 
+    private fun resetCaches() {
+        watchingCache = null
+        watchingCacheProfileId = null
+        cachedPlaybackSessions = null
+        cachedPlaybackStamp = null
+    }
+
     private suspend fun fetchAll(): List<WatchProgressEntry> {
         if (!SimklAuthRepository.hasUsableToken()) return emptyList()
 
-        // In-progress sessions (< 80% watched) — shown as resumable CW cards.
-        //
-        // hide_watched is asked for as false and applied here instead. SIMKL's filter (default
-        // true) drops every session whose title is on the watched list at all, so restarting a
-        // film you have seen before produced a session the server stored and then refused to hand
-        // back — the title never reached Continue Watching. The documented intent is narrower:
-        // exclude items watched *after* the pause, i.e. sessions a later finish made stale. That
-        // is the rule applied below, against our own watched history.
-        val playbackUrl = SimklAuthRepository.appendParams("$BASE_URL/sync/playback?hide_watched=false&limit=100")
-        val playbackResponse = simklRequest(method = "GET", url = playbackUrl, body = "")
-        if (playbackResponse.status !in 200..299) {
-            error("SIMKL /sync/playback returned ${playbackResponse.status}")
-        }
-        val sessions = json.decodeFromString<List<SimklPlaybackSession>>(playbackResponse.body)
+        // Every read below is gated on /sync/activities, the sync guide's first rule. Without it
+        // nothing is fetched: what is cached is served as is, and a first read fails (most often a
+        // spent daily quota, which every other request would hit too).
+        val activities = SimklAuthRepository.fetchActivities()
+        val sessions = playbackSessions(activities)
         sessions.filter { it.type == "movie" }.forEach { session ->
             log.d {
                 "SIMKL playback movie session: animeNode=${session.anime != null} " +
@@ -236,51 +252,133 @@ internal object SimklProgressRepository {
 
         // Shows in "watching" status with last_watched episode marker — used as completed seeds
         // for the existing up-next pipeline.
-        // Rule: check /sync/activities before /sync/all-items to avoid unnecessary full downloads.
-        val activities = SimklAuthRepository.fetchActivities()
-        val latestCwTs = simklWatchingSeedActivitiesStamp(activities)
-        val savedCwTs = SimklSettingsRepository.lastCwActivitiesAt()
-        if (shouldReuseSimklWatchingSeedCache(latestCwTs, savedCwTs, hasLoadedWatchingSeeds)) {
-            log.d { "SIMKL CW: watching-list activities unchanged, skipping re-fetch" }
-            return playbackEntries + cachedWatchingSeeds.withoutSuppressedSeeds()
-        }
-        if (latestCwTs != null && latestCwTs == savedCwTs) {
-            log.d { "SIMKL CW: watching-list activities unchanged but seed cache is unavailable; re-fetching" }
-        }
+        val playbackVideoIds = playbackEntries.map { it.videoId }.toSet()
+        val watching = watchingList(activities)
+        // The array is the anime signal — see SimklAllItemsEntry.showMedia. Concatenating the two
+        // and asking each entry what it is threw that away, and every anime came back down the
+        // non-anime branch with the wrong id namespace.
+        val seeds = watching.entries.mapNotNull { cached ->
+            when (cached.bucket) {
+                SimklListBucket.SHOWS -> cached.entry.toLastWatchedSeedEntry(playbackVideoIds, isAnime = false)
+                SimklListBucket.ANIME -> cached.entry.toLastWatchedSeedEntry(playbackVideoIds, isAnime = true)
+                SimklListBucket.MOVIES -> null
+            }
+        }.withoutSuppressedSeeds()
+        return playbackEntries + seeds
+    }
 
-        // `next_watch_info` attaches each show's next unwatched episode, air date included, to the
-        // same response — the Continue Watching window needs that date to keep a returning show.
-        val watchingUrl = SimklAuthRepository.appendParams(
-            "$BASE_URL/sync/all-items/all/watching?next_watch_info=yes",
-        )
-        val watchingSeeds = try {
-            val resp = simklRequest(method = "GET", url = watchingUrl, body = "")
-            if (resp.status !in 200..299) {
-                error("SIMKL /sync/all-items/all/watching returned ${resp.status}")
+    /**
+     * `/sync/playback?hide_watched=false`, re-read only when a `playback` stamp moved.
+     *
+     * hide_watched is asked for as false and applied by the caller instead. SIMKL's filter (default
+     * true) drops every session whose title is on the watched list at all, so restarting a film you
+     * have seen before produced a session the server stored and then refused to hand back — the
+     * title never reached Continue Watching. The documented intent is narrower: exclude items
+     * watched *after* the pause, i.e. sessions a later finish made stale.
+     */
+    private suspend fun playbackSessions(activities: SimklActivities?): List<SimklPlaybackSession> {
+        val stamp = simklPlaybackActivitiesStamp(activities)
+        cachedPlaybackSessions?.let { cached ->
+            if (activities == null || (stamp != null && stamp == cachedPlaybackStamp)) {
+                log.d { "SIMKL CW: playback activities unchanged, reusing ${cached.size} session(s)" }
+                return cached
             }
-            val parsed = json.decodeFromString<SimklAllItemsResponse>(resp.body)
-            val playbackVideoIds = playbackEntries.map { it.videoId }.toSet()
-            // The array is the anime signal — see SimklAllItemsEntry.showMedia. Concatenating the
-            // two and asking each entry what it is threw that away, and every anime came back down
-            // the non-anime branch with the wrong id namespace.
-            parsed.shows.mapNotNull { entry ->
-                entry.toLastWatchedSeedEntry(playbackVideoIds, isAnime = false)
-            } + parsed.anime.mapNotNull { entry ->
-                entry.toLastWatchedSeedEntry(playbackVideoIds, isAnime = true)
+        }
+        if (activities == null) error("SIMKL activity state could not be read; Continue Watching not fetched")
+        val playbackUrl = SimklAuthRepository.appendParams("$BASE_URL/sync/playback?hide_watched=false&limit=100")
+        val playbackResponse = simklRequest(method = "GET", url = playbackUrl, body = "")
+        if (playbackResponse.status !in 200..299) {
+            error("SIMKL /sync/playback returned ${playbackResponse.status}")
+        }
+        val sessions = json.decodeFromString<List<SimklPlaybackSession>>(playbackResponse.body)
+        cachedPlaybackSessions = sessions
+        cachedPlaybackStamp = stamp
+        return sessions
+    }
+
+    /**
+     * The watching list, kept current the way SIMKL's sync guide asks: a full read of the bucket
+     * once, as the baseline, then a `date_from` delta only when the gate stamp moved, and the
+     * ids-only deletion diff only when `removed_from_list` moved. A failed read serves the stored
+     * list. This used to re-read the whole bucket on every launch and after every history write.
+     */
+    private suspend fun watchingList(activities: SimklActivities?): SimklListCache {
+        val profileId = ProfileRepository.activeProfileId
+        val cache = watchingCache
+            ?.takeIf { watchingCacheProfileId == profileId && SimklListCacheStore.isForCurrentAccount(it) }
+            ?: SimklListCacheStore.load(profileId, WATCHING_LIST_CACHE_KEY).also {
+                watchingCache = it
+                watchingCacheProfileId = profileId
             }
+        if (activities == null) return cache
+        val latestStamp = simklWatchingSeedActivitiesStamp(activities)
+        if (shouldReuseSimklWatchingSeedCache(latestStamp, SimklSettingsRepository.lastCwActivitiesAt(), cache.hasBaseline)) {
+            log.d { "SIMKL CW: watching-list activities unchanged, skipping re-fetch" }
+            return cache
+        }
+        val next = try {
+            syncWatchingList(cache, activities)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            log.w(error) { "SIMKL watching-list seed fetch failed" }
-            null
+            log.w(error) { "SIMKL watching-list fetch failed" }
+            return cache
         }
+        if (profileId != ProfileRepository.activeProfileId) return cache
+        watchingCache = next
+        SimklListCacheStore.save(profileId, WATCHING_LIST_CACHE_KEY, next)
+        if (latestStamp != null) SimklSettingsRepository.setLastCwActivitiesAt(latestStamp)
+        return next
+    }
 
-        if (watchingSeeds != null) {
-            cachedWatchingSeeds = watchingSeeds.withoutSuppressedSeeds()
-            hasLoadedWatchingSeeds = true
-            if (latestCwTs != null) SimklSettingsRepository.setLastCwActivitiesAt(latestCwTs)
+    private suspend fun syncWatchingList(cache: SimklListCache, activities: SimklActivities): SimklListCache {
+        val removedStamp = simklRemovedFromListStamp(activities)
+        // Read before the all-items request, so a change landing while it is in flight is newer
+        // than the watermark and the next delta still sees it.
+        val nextDateFrom = activities.all?.takeIf(String::isNotBlank)
+        val keepWatching = { bucket: SimklListBucket, entry: SimklAllItemsEntry ->
+            bucket != SimklListBucket.MOVIES && entry.hasStatus("watching")
         }
-        return playbackEntries + if (hasLoadedWatchingSeeds) cachedWatchingSeeds else emptyList()
+        if (!cache.hasBaseline) {
+            // `next_watch_info` attaches each show's next unwatched episode, air date included — the
+            // Continue Watching window needs that date to keep a returning show.
+            val baseline = fetchAllItems("/sync/all-items/all/watching?next_watch_info=yes")
+            log.i { "SIMKL CW: watching list baseline, ${baseline.shows.size} shows, ${baseline.anime.size} anime" }
+            return SimklListCache(
+                dateFrom = nextDateFrom,
+                removedStamp = removedStamp,
+                entries = baseline.cachedEntries { bucket, _ -> bucket != SimklListBucket.MOVIES },
+            )
+        }
+        var next = cache
+        if (removedStamp != null && removedStamp != cache.removedStamp) {
+            val present = SimklDeletionCheck.canonicalKeys(SimklDeletionCheck.currentLibrary(removedStamp))
+            next = next.withoutRemoved(present).copy(removedStamp = removedStamp)
+            log.i { "SIMKL CW: deletion check dropped ${cache.entries.size - next.entries.size} title(s)" }
+        }
+        val dateFrom = cache.dateFrom.orEmpty()
+        if (nextDateFrom != dateFrom) {
+            // Every status, not just watching: a title that left the list arrives under its new one.
+            val delta = fetchAllItems("/sync/all-items?next_watch_info=yes&date_from=${simklUrlEncode(dateFrom)}")
+            next = next.applyDelta(delta, keepWatching)
+            log.i {
+                "SIMKL CW: watching list delta since $dateFrom, " +
+                    "${delta.shows.size + delta.anime.size} changed -> ${next.entries.size} watching"
+            }
+        }
+        return next.copy(dateFrom = nextDateFrom ?: cache.dateFrom)
+    }
+
+    private suspend fun fetchAllItems(pathAndQuery: String): SimklAllItemsResponse {
+        val response = simklRequest(
+            method = "GET",
+            url = SimklAuthRepository.appendParams("$BASE_URL$pathAndQuery"),
+            body = "",
+        )
+        if (response.status !in 200..299) error("SIMKL ${pathAndQuery.substringBefore('?')} returned ${response.status}")
+        val body = response.body.trim()
+        if (body.isEmpty() || body == "null" || body == "[]") return SimklAllItemsResponse()
+        return json.decodeFromString<SimklAllItemsResponse>(body)
     }
 
     /**
@@ -531,8 +629,33 @@ internal fun simklWatchingSeedActivitiesStamp(activities: SimklActivities?): Str
     val parts = listOf(
         "shows.watching" to activities.tvShows?.watching,
         "shows.completed" to activities.tvShows?.completed,
+        "shows.hold" to activities.tvShows?.hold,
+        "shows.dropped" to activities.tvShows?.dropped,
+        "shows.plantowatch" to activities.tvShows?.planToWatch,
+        "shows.removed" to activities.tvShows?.removedFromList,
         "anime.watching" to activities.anime?.watching,
         "anime.completed" to activities.anime?.completed,
+        "anime.hold" to activities.anime?.hold,
+        "anime.dropped" to activities.anime?.dropped,
+        "anime.plantowatch" to activities.anime?.planToWatch,
+        "anime.removed" to activities.anime?.removedFromList,
+        // hold / dropped / plantowatch / removed: every way a title can leave the watching list,
+        // so the date_from delta that follows sees it go.
+    )
+    if (parts.all { (_, value) -> value == null }) return null
+    return parts.joinToString("|") { (name, value) -> "$name=${value.orEmpty()}" }
+}
+
+/**
+ * The `playback` stamps of every category — the sync guide's gate for `/sync/playback`, which moves
+ * when a paused session is saved or deleted. Null when SIMKL reports none, which re-reads.
+ */
+internal fun simklPlaybackActivitiesStamp(activities: SimklActivities?): String? {
+    if (activities == null) return null
+    val parts = listOf(
+        "shows" to activities.tvShows?.playback,
+        "movies" to activities.movies?.playback,
+        "anime" to activities.anime?.playback,
     )
     if (parts.all { (_, value) -> value == null }) return null
     return parts.joinToString("|") { (name, value) -> "$name=${value.orEmpty()}" }

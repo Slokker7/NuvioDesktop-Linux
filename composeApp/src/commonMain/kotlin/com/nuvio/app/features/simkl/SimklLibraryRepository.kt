@@ -11,6 +11,7 @@ import com.nuvio.app.features.posterservice.CustomPosterScreen
 import com.nuvio.app.features.posterservice.CustomPosterSettingsRepository
 import com.nuvio.app.features.posterservice.customPosterTemplateUsesNativeAnimeId
 import com.nuvio.app.features.posterservice.resolveCustomPosterIds
+import com.nuvio.app.features.profiles.ProfileRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +41,9 @@ data class SimklLibraryUiState(
 
 private const val BASE_URL = "https://api.simkl.com"
 
+/** [SimklListCacheStore] key of the Plan to Watch list. */
+private const val PLAN_TO_WATCH_CACHE_KEY = "simkl_plan_to_watch"
+
 internal object SimklLibraryRepository {
     private val log = Logger.withTag("SimklLibrary")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -51,10 +55,21 @@ internal object SimklLibraryRepository {
     private var refreshJob: Job? = null
     private var loaded = false
 
+    /** One sync at a time, so overlapping refreshes do not repeat each other's requests. */
+    private val syncMutex = Mutex()
+
+    /** The stored Plan to Watch list for [listCacheProfileId]; see [SimklListCache]. */
+    private var listCache: SimklListCache? = null
+    private var listCacheProfileId: Int? = null
+
     fun ensureLoaded() {
         if (loaded) return
         loaded = true
-        if (SimklAuthRepository.isAuthenticated.value) refreshAsync()
+        if (!SimklAuthRepository.isAuthenticated.value) return
+        // The stored list shows at once; the refresh then only asks SIMKL what changed.
+        val cache = cacheFor(ProfileRepository.activeProfileId)
+        if (cache.hasBaseline) publish(cache, touchedKeys = emptySet())
+        refreshAsync()
     }
 
     fun refreshAsync() {
@@ -62,51 +77,43 @@ internal object SimklLibraryRepository {
         refreshJob = scope.launch { refreshNow() }
     }
 
-    suspend fun refreshNow() {
+    suspend fun refreshNow() = syncMutex.withLock { refreshLocked() }
+
+    private suspend fun refreshLocked() {
         if (!SimklAuthRepository.isAuthenticated.value) {
             _uiState.value = SimklLibraryUiState(hasLoaded = true)
             return
         }
         _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
 
-        // Rule: always check /sync/activities before /sync/all-items.
+        // Rule: always check /sync/activities before /sync/all-items. Without it nothing is read.
+        val profileId = ProfileRepository.activeProfileId
+        val cache = cacheFor(profileId)
         val activities = SimklAuthRepository.fetchActivities()
-        val latestTs = listOfNotNull(
-            activities?.tvShows?.planToWatch,
-            activities?.movies?.planToWatch,
-            activities?.anime?.planToWatch,
-        ).maxOrNull()
+        val latestTs = simklPlanToWatchActivitiesStamp(activities)
         val savedTs = SimklSettingsRepository.lastLibraryActivitiesAt()
-        if (latestTs != null && latestTs == savedTs && _uiState.value.allItems.isNotEmpty()) {
-            // Nothing changed — reuse the cached state rather than downloading the full library.
-            log.d { "SIMKL library: activities unchanged, skipping full fetch" }
-            _uiState.value = _uiState.value.copy(isLoading = false, hasLoaded = true)
+        if (activities == null || (cache.hasBaseline && latestTs != null && latestTs == savedTs)) {
+            if (activities == null) log.w { "SIMKL library: activity state could not be read; serving the stored list" }
+            else log.d { "SIMKL library: activities unchanged, skipping fetch" }
+            _uiState.value = _uiState.value.copy(
+                isLoading = false,
+                hasLoaded = true,
+                errorMessage = "SIMKL activity state could not be read.".takeIf { !cache.hasBaseline },
+            )
             return
         }
 
-        runCatching {
-            // Rule: fetch shows, movies, anime SEQUENTIALLY (not in parallel) to avoid
-            // CPU spikes on SIMKL's servers during large initial library downloads.
-            val shows = fetchType("shows")
-            val movies = fetchType("movies")
-            val anime = fetchType("anime")
-            Triple(shows, movies, anime)
-        }.fold(
-            onSuccess = { (shows, movies, anime) ->
-                _uiState.value = SimklLibraryUiState(
-                    shows = shows,
-                    movies = movies,
-                    anime = anime,
-                    isLoading = false,
-                    hasLoaded = true,
-                )
-                log.d { "SIMKL library: ${shows.size} shows, ${movies.size} movies, ${anime.size} anime" }
+        runCatching { syncPlanToWatch(cache, activities) }.fold(
+            onSuccess = { (next, touchedKeys) ->
+                if (profileId != ProfileRepository.activeProfileId) return
+                listCache = next
+                SimklListCacheStore.save(profileId, PLAN_TO_WATCH_CACHE_KEY, next)
+                publish(next, touchedKeys)
+                val state = _uiState.value
+                log.d { "SIMKL library: ${state.shows.size} shows, ${state.movies.size} movies, ${state.anime.size} anime" }
                 if (latestTs != null) SimklSettingsRepository.setLastLibraryActivitiesAt(latestTs)
-                // Enrich items with genres/description/runtime from the addon system in the
-                // background. Results update the uiState so poster row labels and the hero
-                // both reflect real metadata without requiring a detail-page visit first.
-                // Enrichment is NOT launched here — addons may not be loaded yet at this
-                // point. HomeScreen triggers enrichLibraryItems() once addons are ready.
+                // Enrichment is NOT launched here — addons may not be loaded yet at this point.
+                // HomeScreen triggers enrichLibraryItems() once addons are ready.
             },
             onFailure = { error ->
                 log.w(error) { "SIMKL library fetch failed" }
@@ -119,10 +126,85 @@ internal object SimklLibraryRepository {
         )
     }
 
-    fun clearLocalState() {
+    /**
+     * Plan to Watch kept current the way SIMKL's sync guide asks: the three per-type reads once, as
+     * the baseline, then a `date_from` delta when activities moved, and the ids-only deletion diff
+     * only when `removed_from_list` moved. This used to re-read all three in full on every launch
+     * and after every history write. Returns the next list and the SIMKL ids the delta changed.
+     */
+    private suspend fun syncPlanToWatch(
+        cache: SimklListCache,
+        activities: SimklActivities,
+    ): Pair<SimklListCache, Set<Int>> {
+        val removedStamp = simklRemovedFromListStamp(activities)
+        // Read before the all-items requests, so a change landing meanwhile is newer than it.
+        val nextDateFrom = activities.all?.takeIf(String::isNotBlank)
+        if (!cache.hasBaseline) {
+            // Rule: fetch shows, movies, anime SEQUENTIALLY (not in parallel) to avoid
+            // CPU spikes on SIMKL's servers during large initial library downloads.
+            val entries = fetchType("shows") + fetchType("movies") + fetchType("anime")
+            return SimklListCache(dateFrom = nextDateFrom, removedStamp = removedStamp, entries = entries) to emptySet()
+        }
+        var next = cache
+        val touched = mutableSetOf<Int>()
+        if (removedStamp != null && removedStamp != cache.removedStamp) {
+            val present = SimklDeletionCheck.canonicalKeys(SimklDeletionCheck.currentLibrary(removedStamp))
+            next = next.withoutRemoved(present).copy(removedStamp = removedStamp)
+            log.i { "SIMKL library: deletion check dropped ${cache.entries.size - next.entries.size} title(s)" }
+        }
+        val dateFrom = cache.dateFrom.orEmpty()
+        if (nextDateFrom != dateFrom) {
+            // Every status: a title that left Plan to Watch arrives under its new one and is dropped.
+            // `extended=full` for the same reason as [fetchType].
+            val delta = fetchAllItems("/sync/all-items?extended=full&date_from=${simklUrlEncode(dateFrom)}")
+            next = next.applyDelta(delta) { _, entry -> entry.hasStatus("plantowatch") }
+            delta.cachedEntries().mapNotNullTo(touched) { it.entry.simklKey }
+            log.i { "SIMKL library: delta since $dateFrom, ${touched.size} changed -> ${next.entries.size} planned" }
+        }
+        return next.copy(dateFrom = nextDateFrom ?: cache.dateFrom) to touched
+    }
+
+    private fun cacheFor(profileId: Int): SimklListCache =
+        listCache?.takeIf { listCacheProfileId == profileId && SimklListCacheStore.isForCurrentAccount(it) }
+            ?: SimklListCacheStore.load(profileId, PLAN_TO_WATCH_CACHE_KEY).also {
+                listCache = it
+                listCacheProfileId = profileId
+            }
+
+    /**
+     * Rebuilds the visible lists from [cache]. An item whose title the delta did not touch keeps its
+     * current, already-enriched row — re-deriving it would drop the addon metadata until the next
+     * enrichment pass.
+     */
+    private fun publish(cache: SimklListCache, touchedKeys: Set<Int>) {
+        val current = _uiState.value.allItems.associateBy { it.type to it.id }
+        fun build(bucket: SimklListBucket, contentType: String) = cache.entries
+            .filter { it.bucket == bucket }
+            .mapNotNull { cached ->
+                val item = cached.entry.toLibraryItem(contentType) ?: return@mapNotNull null
+                if (cached.entry.simklKey in touchedKeys) item else current[item.type to item.id] ?: item
+            }
+        _uiState.value = SimklLibraryUiState(
+            shows = build(SimklListBucket.SHOWS, "series"),
+            movies = build(SimklListBucket.MOVIES, "movie"),
+            anime = build(SimklListBucket.ANIME, "series"),
+            isLoading = false,
+            hasLoaded = true,
+        )
+    }
+
+    fun onProfileChanged() {
         refreshJob?.cancel()
         loaded = false
+        listCache = null
+        listCacheProfileId = null
         _uiState.value = SimklLibraryUiState()
+    }
+
+    /** Called on disconnect: also forgets the stored list. */
+    fun clearLocalState() {
+        onProfileChanged()
+        SimklListCacheStore.clear(ProfileRepository.activeProfileId, PLAN_TO_WATCH_CACHE_KEY)
     }
 
     /** Adds to Plan to Watch, or removes the item from SIMKL's library entirely. */
@@ -238,27 +320,28 @@ internal object SimklLibraryRepository {
         return copy(shows = nextShows, movies = nextMovies, anime = nextAnime, hasLoaded = true)
     }
 
-    private suspend fun fetchType(type: String): List<LibraryItem> {
+    private suspend fun fetchType(type: String): List<SimklCachedEntry> {
         if (!SimklAuthRepository.hasUsableToken()) return emptyList()
         // Filter to plantowatch only — the user's "want to watch" list, not their full history.
         // `extended=full` for the ids: the default response states the one id SIMKL indexes the
         // entry by, and a row that knows only its IMDb id cannot fill a poster template that also
         // names the TMDB one. Matches SimklWatchedRepository, and the parser ignores the extra
         // fields it brings along.
-        val url = SimklAuthRepository.appendParams(
-            "$BASE_URL/sync/all-items/$type/plantowatch?extended=full",
+        return fetchAllItems("/sync/all-items/$type/plantowatch?extended=full").cachedEntries()
+    }
+
+    private suspend fun fetchAllItems(pathAndQuery: String): SimklAllItemsResponse {
+        val response = simklRequest(
+            method = "GET",
+            url = SimklAuthRepository.appendParams("$BASE_URL$pathAndQuery"),
+            body = "",
         )
-        val response = simklRequest(method = "GET", url = url, body = "")
         if (response.status !in 200..299) {
-            error("SIMKL /sync/all-items/$type returned ${response.status}")
+            error("SIMKL ${pathAndQuery.substringBefore('?')} returned ${response.status}")
         }
-        val parsed = json.decodeFromString<SimklAllItemsResponse>(response.body)
-        val contentType = if (type == "movies") "movie" else "series"
-        return buildList {
-            parsed.shows.forEach { it.toLibraryItem(contentType)?.let(::add) }
-            parsed.movies.forEach { it.toLibraryItem(contentType)?.let(::add) }
-            parsed.anime.forEach { it.toLibraryItem(contentType)?.let(::add) }
-        }
+        val body = response.body.trim()
+        if (body.isEmpty() || body == "null" || body == "[]") return SimklAllItemsResponse()
+        return json.decodeFromString<SimklAllItemsResponse>(body)
     }
 
     private fun SimklAllItemsEntry.toLibraryItem(type: String): LibraryItem? {
@@ -405,4 +488,30 @@ internal object SimklLibraryRepository {
         if (resolved.imdbId == imdbId && resolved.tmdbId == tmdbId) return this
         return copy(imdbId = resolved.imdbId ?: imdbId, tmdbId = resolved.tmdbId ?: tmdbId)
     }
+}
+
+/**
+ * The activities stamp that decides whether Plan to Watch may have changed: every status a title can
+ * enter or leave it through, plus `removed_from_list`, for all three categories. A title leaving the
+ * list bumps the stamp of the status it moved to, which `plantowatch` alone would miss.
+ */
+internal fun simklPlanToWatchActivitiesStamp(activities: SimklActivities?): String? {
+    if (activities == null) return null
+    val categories = listOf(
+        "shows" to activities.tvShows,
+        "movies" to activities.movies,
+        "anime" to activities.anime,
+    )
+    val parts = categories.flatMap { (name, category) ->
+        listOf(
+            "$name.plantowatch" to category?.planToWatch,
+            "$name.watching" to category?.watching,
+            "$name.completed" to category?.completed,
+            "$name.hold" to category?.hold,
+            "$name.dropped" to category?.dropped,
+            "$name.removed" to category?.removedFromList,
+        )
+    }
+    if (parts.all { (_, value) -> value == null }) return null
+    return parts.joinToString("|") { (name, value) -> "$name=${value.orEmpty()}" }
 }

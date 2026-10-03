@@ -126,19 +126,28 @@ internal object SimklScrobbleAdapter : TrackingScrobbler {
             isAnime = media.kind == TrackingMediaKind.ANIME,
         ) ?: return TrackingScrobbleResult.Declined
         val progressPercent = event.progressPercent.toFloat()
+        val inActiveRewatch = item is SimklScrobbleItem.Episode &&
+            SimklRewatchRepository.hasActiveRewatchFor(item)
 
         return when (action) {
-            TrackingScrobbleAction.START ->
+            // No /scrobble call can address a rewatch session. During a rewatch the finishing stop is
+            // diverted below, so a plain start here opened a SIMKL playback session nothing ever
+            // stopped; per SIMKL's rewatch guide the next /scrobble/start "tidies up" such a stale
+            // session first, which matured it into a watch on the completed original — at every new
+            // episode, showing as "Seen All" over the rewatch. Report starts (including progress
+            // refreshes) and resumable stops handled without sending anything.
+            TrackingScrobbleAction.START -> if (inActiveRewatch) {
+                TrackingScrobbleResult.Handled
+            } else {
                 SimklScrobbleRepository.scrobbleStart(item = item, progressPercent = progressPercent).copy(handled = true)
+            }
             // A pause is reported as a stop here, and this stop records 80%+ as a watch.
             TrackingScrobbleAction.STOP -> {
                 if (isPauseThatStopWouldRecordAsWatched(event)) {
                     TrackingScrobbleResult.Declined
-                } else if (
-                    item is SimklScrobbleItem.Episode &&
-                    progressPercent >= SIMKL_SCROBBLE_WATCHED_PERCENT &&
-                    SimklRewatchRepository.hasActiveRewatchFor(item)
-                ) {
+                } else if (inActiveRewatch && progressPercent < SIMKL_SCROBBLE_WATCHED_PERCENT) {
+                    TrackingScrobbleResult.Handled
+                } else if (inActiveRewatch && item is SimklScrobbleItem.Episode) {
                     // A plain completing stop marks the episode watched on the title's original
                     // watch, so during an active rewatch it reset the original to the rewatched
                     // episodes. Scrobble's own allow_rewatch cannot pin a session id and forks a new
@@ -178,7 +187,7 @@ internal object SimklLibraryAdapter : TrackingLibraryProvider {
     override val connectionRefreshIntent: TrackingRefreshIntent = TrackingRefreshIntent.AUTOMATIC
 
     override fun ensureLoaded() = SimklLibraryRepository.ensureLoaded()
-    override fun onProfileChanged() = SimklLibraryRepository.clearLocalState()
+    override fun onProfileChanged() = SimklLibraryRepository.onProfileChanged()
     override fun clearLocalState() = SimklLibraryRepository.clearLocalState()
     override suspend fun refresh(intent: TrackingRefreshIntent) = SimklLibraryRepository.refreshNow()
 
