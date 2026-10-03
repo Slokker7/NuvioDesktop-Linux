@@ -64,3 +64,13 @@ internal actual object SimklEpisodeCatalogStorage {
         store.putString(payloadKey, payload)
     }
 }
+
+internal actual object SimklListCacheStorage {
+    private val store = DesktopStorage.store("nuvio_simkl_list_cache")
+
+    actual fun loadPayload(profileId: Int, key: String): String? = store.getString(ProfileScopedKey.of(key, profileId))
+
+    actual fun savePayload(profileId: Int, key: String, payload: String?) {
+        store.putString(ProfileScopedKey.of(key, profileId), payload)
+    }
+}

@@ -140,7 +140,7 @@ internal object SimklRewatchRepository {
             var needsFull = full || lastActivitiesAt.isNullOrBlank()
             val needsDeletionCheck = !needsFull && sessions.isNotEmpty() &&
                 removedStamp != null && removedStamp != lastRemovedStamp
-            if (needsDeletionCheck && !reconcileDeletions(removedStamp)) {
+            if (needsDeletionCheck && removedStamp != null && !reconcileDeletions(removedStamp)) {
                 // The ids-only answer could not say which sessions survive; fall back to one baseline.
                 needsFull = true
             }
@@ -187,23 +187,12 @@ internal object SimklRewatchRepository {
     }
 
     /**
-     * Drops stored sessions SIMKL no longer has, from the smallest full-library read. Returns false
-     * when the answer cannot decide that (see [reconcileRewatchDeletions]), leaving sessions as is.
+     * Drops stored sessions SIMKL no longer has, from the shared ids-only library read (see
+     * [SimklDeletionCheck]). Returns false when the answer cannot decide that (see
+     * [reconcileRewatchDeletions]), leaving sessions as is.
      */
-    private suspend fun reconcileDeletions(removedStamp: String?): Boolean {
-        val response = simklRequest(
-            method = "GET",
-            url = SimklAuthRepository.appendParams(
-                "$SIMKL_BASE_URL/sync/all-items?allow_rewatch=yes&extended=simkl_ids_only",
-            ),
-        )
-        if (response.status !in 200..299) error("SIMKL rewatch deletion check failed (${response.status}).")
-        val body = response.body.trim()
-        val present = if (body.isEmpty() || body == "null" || body == "[]") {
-            SimklAllItemsResponse()
-        } else {
-            json.decodeFromString<SimklAllItemsResponse>(body)
-        }
+    private suspend fun reconcileDeletions(removedStamp: String): Boolean {
+        val present = SimklDeletionCheck.currentLibrary(removedStamp)
         return mutex.withLock {
             val kept = sessions.reconcileRewatchDeletions(present) ?: run {
                 log.w { "SIMKL rewatch deletion check: ids-only rows carried no session ids; doing a full read" }
@@ -213,7 +202,7 @@ internal object SimklRewatchRepository {
                 log.i { "SIMKL rewatch deletion check: dropped ${sessions.size - kept.size} session(s) SIMKL no longer has" }
             }
             sessions = kept.toMutableList()
-            lastRemovedStamp = removedStamp ?: lastRemovedStamp
+            lastRemovedStamp = removedStamp
             persist()
             publish()
             true
@@ -430,6 +419,9 @@ internal object SimklRewatchRepository {
         }
         return Result.failure(lastFailure ?: IllegalStateException("SIMKL rewatch update failed."))
     }
+
+    /** Whether `allow_rewatch=yes` may be sent at all: tracking on, connected, PRO or VIP. */
+    internal fun requestsAllowed(): Boolean = rewatchRequestsAllowed()
 
     private fun rewatchRequestsAllowed(): Boolean =
         SimklSettingsRepository.isRewatchTrackingEnabled() &&

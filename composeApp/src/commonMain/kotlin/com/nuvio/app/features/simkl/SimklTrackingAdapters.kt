@@ -187,7 +187,7 @@ internal object SimklLibraryAdapter : TrackingLibraryProvider {
     override val connectionRefreshIntent: TrackingRefreshIntent = TrackingRefreshIntent.AUTOMATIC
 
     override fun ensureLoaded() = SimklLibraryRepository.ensureLoaded()
-    override fun onProfileChanged() = SimklLibraryRepository.clearLocalState()
+    override fun onProfileChanged() = SimklLibraryRepository.onProfileChanged()
     override fun clearLocalState() = SimklLibraryRepository.clearLocalState()
     override suspend fun refresh(intent: TrackingRefreshIntent) = SimklLibraryRepository.refreshNow()
 

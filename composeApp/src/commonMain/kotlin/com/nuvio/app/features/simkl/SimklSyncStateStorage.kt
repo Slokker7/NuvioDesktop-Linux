@@ -11,3 +11,9 @@ internal expect object SimklEpisodeCatalogStorage {
     fun loadPayload(): String?
     fun savePayload(payload: String?)
 }
+
+/** Per-profile list caches keyed by list; see [SimklListCache]. A null payload clears the entry. */
+internal expect object SimklListCacheStorage {
+    fun loadPayload(profileId: Int, key: String): String?
+    fun savePayload(profileId: Int, key: String, payload: String?)
+}
