@@ -48,6 +48,7 @@ data class PlayerLaunch(
     // It disambiguates artwork lookup and library download names.
     val releaseYear: Int? = null,
     val streamTitle: String,
+    val streamFilename: String? = null,
     val streamSubtitle: String? = null,
     val sourceIdentityKey: String? = null,
     val bingeGroup: String? = null,

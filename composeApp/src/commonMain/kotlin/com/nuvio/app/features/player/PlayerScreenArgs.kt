@@ -12,6 +12,7 @@ internal data class PlayerScreenArgs(
     val sourceAffinity: PlayerSourceAffinity,
     val providerName: String,
     val streamTitle: String,
+    val streamFilename: String?,
     val streamSubtitle: String?,
     val sourceIdentityKey: String?,
     val initialBingeGroup: String?,

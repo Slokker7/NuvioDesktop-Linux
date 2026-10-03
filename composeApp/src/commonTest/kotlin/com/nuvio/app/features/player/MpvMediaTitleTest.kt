@@ -18,6 +18,24 @@ class MpvMediaTitleTest {
     }
 
     @Test
+    fun `real media file name wins over the source label`() {
+        assertEquals(
+            "Show.S01E01.1080p.WEB-DL.mkv",
+            preferredMpvMediaTitle(
+                streamTitle = "TorBox 1080p",
+                title = "Show",
+                episodeText = "S1 E1",
+                streamFilename = "Show.S01E01.1080p.WEB-DL.mkv",
+            ),
+        )
+    }
+
+    @Test
+    fun `blank file name falls back to the source label`() {
+        assertEquals("TorBox 1080p", preferredMpvMediaTitle("TorBox 1080p", "Show", null, streamFilename = " "))
+    }
+
+    @Test
     fun `content and episode form the fallback without a stream label`() {
         assertEquals(
             "Friendly Drama S1 E2",

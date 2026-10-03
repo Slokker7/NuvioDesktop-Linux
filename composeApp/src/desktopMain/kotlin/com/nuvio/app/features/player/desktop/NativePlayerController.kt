@@ -230,6 +230,7 @@ internal class NativePlayerController(
         }
         val pending = PendingSource(
             sourceUrl = sourceUrl,
+            mediaTitle = mediaTitle,
             sourceAudioUrl = sourceAudioUrl?.takeIf { it.isNotBlank() },
             headerLines = sourceHeaders.withDefaultPlaybackUserAgent(sourceUrl).toHeaderLines(),
             playWhenReady = playWhenReady,
@@ -337,7 +338,7 @@ internal class NativePlayerController(
                     val result = runCatching {
                         newHandle = NativePlayerBridge.create(
                             hostViewPtr = hostViewPtr,
-                            sourceUrl = pending.sourceUrl,
+                            sourceUrl = withMpvFilenameHint(pending.sourceUrl, pending.mediaTitle),
                             sourceAudioUrl = pending.sourceAudioUrl,
                             headerLines = pending.headerLines.toTypedArray(),
                             playWhenReady = pending.playWhenReady,
@@ -428,6 +429,7 @@ internal class NativePlayerController(
         val current = currentHandle.takeIf { it != 0L } ?: return
         val mpvMediaTitle = preferredMpvMediaTitle(
             streamTitle = state.streamTitle,
+            streamFilename = state.streamFilename,
             title = state.title,
             episodeText = state.episodeText,
         )
@@ -1336,6 +1338,7 @@ internal class NativePlayerController(
         val pending = pendingSource ?: return
         attach(
             sourceUrl = pending.sourceUrl,
+            mediaTitle = pending.mediaTitle,
             sourceAudioUrl = pending.sourceAudioUrl,
             sourceHeaders = pending.headerLines.toHeaderMap(),
             playWhenReady = pending.playWhenReady,
@@ -1778,6 +1781,7 @@ private fun String.jsEscape(): String =
 
 private data class PendingSource(
     val sourceUrl: String,
+    val mediaTitle: String = "",
     val sourceAudioUrl: String?,
     val headerLines: List<String>,
     val playWhenReady: Boolean,
@@ -1895,6 +1899,26 @@ private fun buildDesktopUserMpvOptions(initialPlaybackSpeed: Float): List<String
  * legitimately take 10 s or more (Debridio once took 14 s waiting on a throttled TorBox call).
  */
 internal const val DIRECT_MEDIA_NETWORK_TIMEOUT_SECONDS = 15
+
+/**
+ * mpv's diagnostics overlay prints the `filename` property, which is the last path segment of the
+ * URL it opened and ignores `force-media-title`. A debrid CDN link ends in an opaque hash plus the
+ * account token (`/dld/<hash>?token=...`), so that is what the overlay showed.
+ *
+ * Appending `#/<title>` gives mpv a readable basename. FFmpeg's http protocol drops the fragment
+ * from the request line, so the server sees the original URL. Limited to direct-media hosts and to
+ * non-manifest paths: an HLS/DASH manifest resolves its relative segment URLs against the base URL,
+ * and a `/` inside the fragment would corrupt that base.
+ */
+internal fun withMpvFilenameHint(url: String, title: String): String {
+    val name = title.trim().replace(Regex("[\\\\/\\s]+"), " ").trim()
+    if (name.isEmpty() || '#' in url) return url
+    if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) return url
+    if (!PlaybackRedirectResolver.isDirectMediaHost(url)) return url
+    val path = url.substringBefore('?').lowercase()
+    if (path.endsWith(".m3u8") || path.endsWith(".mpd")) return url
+    return "$url#/${java.net.URLEncoder.encode(name, Charsets.UTF_8).replace("+", "%20")}"
+}
 
 internal fun directMediaNetworkTimeoutOption(sourceUrl: String): String? =
     if (PlaybackRedirectResolver.isDirectMediaHost(sourceUrl)) {

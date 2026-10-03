@@ -349,6 +349,7 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
         title = title,
         episodeText = episodeText,
         streamTitle = activeStreamTitle,
+        streamFilename = activeStreamFilename.orEmpty(),
         providerName = activeProviderName,
         pauseOverlayWatchingLabel = stringResource(Res.string.compose_player_youre_watching),
         pauseOverlayLogo = logo,

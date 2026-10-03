@@ -491,6 +491,7 @@ private fun NativePlayerSurface(
                 sourceHeaders = playbackHeaders,
                 mediaTitle = preferredMpvMediaTitle(
                     streamTitle = playerControlsState.streamTitle,
+                    streamFilename = playerControlsState.streamFilename,
                     title = playerControlsState.title,
                     episodeText = playerControlsState.episodeText,
                 ),

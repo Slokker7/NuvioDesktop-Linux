@@ -38,6 +38,7 @@ internal class PlayerScreenRuntime(
     val sourceAffinity: PlayerSourceAffinity get() = args.sourceAffinity
     val providerName: String get() = args.providerName
     val streamTitle: String get() = args.streamTitle
+    val streamFilename: String? get() = args.streamFilename
     val streamSubtitle: String? get() = args.streamSubtitle
     val initialBingeGroup: String? get() = args.initialBingeGroup
     val pauseDescription: String? get() = args.pauseDescription
@@ -142,6 +143,7 @@ internal class PlayerScreenRuntime(
         } ?: sourceUrl.trim().takeIf { it.isNotBlank() }?.let { url -> "url:$url" },
     )
     var activeStreamTitle by mutableStateOf(streamTitle)
+    var activeStreamFilename by mutableStateOf(streamFilename)
     var activeStreamSubtitle by mutableStateOf(streamSubtitle)
     var activeProviderName by mutableStateOf(providerName)
     var activeProviderAddonId by mutableStateOf(providerAddonId)

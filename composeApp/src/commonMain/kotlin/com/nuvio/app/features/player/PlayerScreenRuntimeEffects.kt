@@ -58,6 +58,7 @@ import com.nuvio.app.features.player.skip.SKIP_SUBMIT_RESULT_TIMEOUT_MS
 import com.nuvio.app.features.player.skip.SkipSubmitToastPhase
 import com.nuvio.app.features.playlist.PlaylistPlaybackSession
 import com.nuvio.app.features.plugins.PluginRepository
+import com.nuvio.app.features.streams.mediaFilename
 import com.nuvio.app.features.streams.StreamPrefetchService
 import com.nuvio.app.features.streams.BingeGroupCacheRepository
 import com.nuvio.app.features.streams.StreamLinkCacheRepository
@@ -1990,6 +1991,7 @@ internal fun PlayerScreenRuntime.tryRefreshCredentialedSourceAfterError(message:
         activeStreamType = stream.streamType
         activeSourceIdentityKey = stream.playerSourceIdentityKey()
         activeStreamTitle = stream.streamLabel
+        activeStreamFilename = stream.mediaFilename
         activeStreamSubtitle = stream.streamSubtitle
         activeProviderName = stream.addonName
         activeProviderAddonId = stream.addonId

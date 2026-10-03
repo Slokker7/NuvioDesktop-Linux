@@ -328,6 +328,7 @@ import com.nuvio.app.features.home.HomeCatalogSettingsSyncService
 import com.nuvio.app.features.collection.FolderDetailScreen
 import com.nuvio.app.features.collection.FolderDetailRepository
 import com.nuvio.app.features.collection.clearFolderScrollSession
+import com.nuvio.app.features.streams.mediaFilename
 import com.nuvio.app.features.streams.BingeGroupCacheRepository
 import com.nuvio.app.features.streams.StreamBehaviorHints
 import com.nuvio.app.features.streams.StreamItem
@@ -2338,6 +2339,7 @@ private fun MainAppContent(
                         episodeThumbnail = entry.episodeThumbnail,
                         releaseYear = releaseYear,
                         streamTitle = stream.streamLabel,
+                        streamFilename = stream.mediaFilename,
                         streamSubtitle = stream.streamSubtitle,
                         sourceIdentityKey = stream.playerSourceIdentityKey(),
                         bingeGroup = stream.behaviorHints.bingeGroup,
@@ -3450,6 +3452,7 @@ private fun MainAppContent(
                             episodeTitle = launch.episodeTitle,
                             episodeThumbnail = launch.episodeThumbnail,
                             streamTitle = stream.streamLabel,
+                            streamFilename = stream.mediaFilename,
                             streamSubtitle = stream.streamSubtitle,
                             sourceIdentityKey = stream.playerSourceIdentityKey(),
                             bingeGroup = stream.behaviorHints.bingeGroup,
@@ -3724,6 +3727,7 @@ private fun MainAppContent(
                                 episodeTitle = launch.episodeTitle,
                                 episodeThumbnail = launch.episodeThumbnail,
                                 streamTitle = stream.streamLabel,
+                                streamFilename = stream.mediaFilename,
                                 streamSubtitle = stream.streamSubtitle,
                                 sourceIdentityKey = selectedSourceIdentityKey,
                                 bingeGroup = stream.behaviorHints.bingeGroup,
@@ -3863,6 +3867,7 @@ private fun MainAppContent(
                             episodeTitle = launch.episodeTitle,
                             episodeThumbnail = launch.episodeThumbnail,
                             streamTitle = stream.streamLabel,
+                            streamFilename = stream.mediaFilename,
                             streamSubtitle = stream.streamSubtitle,
                             sourceIdentityKey = sourceIdentityKey,
                             bingeGroup = stream.behaviorHints.bingeGroup,
@@ -4052,6 +4057,7 @@ private fun MainAppContent(
                         episodeThumbnail = launch.episodeThumbnail,
                         releaseYear = launch.releaseYear,
                         streamTitle = launch.streamTitle,
+                        streamFilename = launch.streamFilename,
                         streamSubtitle = launch.streamSubtitle,
                         sourceIdentityKey = launch.sourceIdentityKey,
                         initialBingeGroup = launch.bingeGroup,

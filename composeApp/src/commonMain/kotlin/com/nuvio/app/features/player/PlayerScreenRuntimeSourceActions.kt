@@ -15,6 +15,7 @@ import com.nuvio.app.features.p2p.P2pSettingsRepository
 import com.nuvio.app.features.p2p.P2pStreamingEngine
 import com.nuvio.app.features.player.skip.NextEpisodeInfo
 import com.nuvio.app.features.playlist.PlaylistPlaybackSession
+import com.nuvio.app.features.streams.mediaFilename
 import com.nuvio.app.features.streams.StreamDebridCacheState
 import com.nuvio.app.features.streams.StreamItem
 import com.nuvio.app.features.streams.StreamScorer
@@ -211,6 +212,7 @@ internal fun PlayerScreenRuntime.switchToP2pSourceStream(
     activeTorrentTrackers = stream.p2pTrackers
     activeSourceIdentityKey = stream.playerSourceIdentityKey()
     activeStreamTitle = stream.streamLabel
+    activeStreamFilename = stream.mediaFilename
     activeStreamSubtitle = stream.streamSubtitle
     activeProviderName = stream.addonName
     activeProviderAddonId = stream.addonId
@@ -321,6 +323,7 @@ internal fun PlayerScreenRuntime.switchToSource(
     activeStreamType = stream.streamType
     activeSourceIdentityKey = sourceIdentityKey
     activeStreamTitle = stream.streamLabel
+    activeStreamFilename = stream.mediaFilename
     activeStreamSubtitle = stream.streamSubtitle
     activeProviderName = stream.addonName
     activeProviderAddonId = stream.addonId
@@ -437,6 +440,7 @@ internal fun PlayerScreenRuntime.switchToDownloadedEpisode(downloadItem: Downloa
         downloadedLabel = downloadedLabel,
     )
     activeStreamTitle = labels.streamTitle
+    activeStreamFilename = null
     activeStreamSubtitle = labels.streamSubtitle
     activeProviderName = labels.providerName
     activeProviderAddonId = downloadItem.providerAddonId
@@ -1107,6 +1111,7 @@ private fun PlayerScreenRuntime.applyEpisodeStreamMetadata(
     resetFailoverBudget()
     activeSourceIdentityKey = sourceIdentityKey
     activeStreamTitle = stream.streamLabel
+    activeStreamFilename = stream.mediaFilename
     activeStreamSubtitle = stream.streamSubtitle
     activeProviderName = stream.addonName
     activeProviderAddonId = stream.addonId

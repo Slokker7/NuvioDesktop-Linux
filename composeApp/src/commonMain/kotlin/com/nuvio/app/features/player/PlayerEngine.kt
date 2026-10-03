@@ -99,6 +99,8 @@ data class PlayerControlsState(
     // and the hero-trailer surfaces leave it blank, which clears the thumbnail.
     val mediaSessionArtwork: String = "",
     val streamTitle: String = "",
+    // The addon's real media file name; mpv's diagnostics show it ahead of the source label.
+    val streamFilename: String = "",
     val providerName: String = "",
     val pauseOverlayWatchingLabel: String = "You're watching",
     val pauseOverlayLogo: String? = null,
@@ -394,12 +396,17 @@ data class PlayerControlsState(
  * A resolved debrid URL is an implementation detail and can contain both opaque hashes and access
  * tokens. The source-list label is already the user-facing description of that URL, so it wins;
  * title/episode metadata is only a fallback for direct and local playback.
+ *
+ * The diagnostics overlay is meant to describe the media itself, so when the addon states the real
+ * file name ([streamFilename]) that comes first, ahead of the label.
  */
 internal fun preferredMpvMediaTitle(
     streamTitle: String?,
     title: String?,
     episodeText: String?,
-): String = streamTitle.cleanMpvMediaTitlePart()
+    streamFilename: String? = null,
+): String = streamFilename.cleanMpvMediaTitlePart()
+    ?: streamTitle.cleanMpvMediaTitlePart()
     ?: listOfNotNull(
         title.cleanMpvMediaTitlePart(),
         episodeText.cleanMpvMediaTitlePart(),

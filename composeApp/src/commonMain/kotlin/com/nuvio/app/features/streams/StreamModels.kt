@@ -301,6 +301,14 @@ val StreamItem.isScorableStream: Boolean
         externalUrl.isMagnetLink() ||
         externalUrl.isTorrentSchemeUrl()
 
+/** The media file name the addon states for this stream, if any; never the display label. */
+val StreamItem.mediaFilename: String?
+    get() = (
+        behaviorHints.filename
+            ?: clientResolve?.filename
+            ?: clientResolve?.stream?.raw?.filename
+        )?.trim()?.takeIf { it.isNotEmpty() }
+
 fun StreamItem.isSelectableForPlayback(debridEnabled: Boolean): Boolean =
     playableDirectUrl != null ||
         (AppFeaturePolicy.p2pEnabled && needsLocalDebridResolve && p2pInfoHash != null) ||
