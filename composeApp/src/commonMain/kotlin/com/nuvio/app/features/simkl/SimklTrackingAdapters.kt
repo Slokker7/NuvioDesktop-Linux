@@ -126,19 +126,27 @@ internal object SimklScrobbleAdapter : TrackingScrobbler {
             isAnime = media.kind == TrackingMediaKind.ANIME,
         ) ?: return TrackingScrobbleResult.Declined
         val progressPercent = event.progressPercent.toFloat()
+        val inActiveRewatch = item is SimklScrobbleItem.Episode &&
+            SimklRewatchRepository.hasActiveRewatchFor(item)
 
         return when (action) {
-            TrackingScrobbleAction.START ->
+            // Every /scrobble call lands on the title's original watch; none can address a rewatch
+            // session. During a rewatch a start (and each progress refresh, which is a start) or a
+            // resumable stop therefore bumped the completed original back to the top of SIMKL's
+            // Recently Watched as "Seen All" over the rewatch entry, at every episode. Report them
+            // handled without sending anything; the finishing stop below is pinned to the session.
+            TrackingScrobbleAction.START -> if (inActiveRewatch) {
+                TrackingScrobbleResult.Handled
+            } else {
                 SimklScrobbleRepository.scrobbleStart(item = item, progressPercent = progressPercent).copy(handled = true)
+            }
             // A pause is reported as a stop here, and this stop records 80%+ as a watch.
             TrackingScrobbleAction.STOP -> {
                 if (isPauseThatStopWouldRecordAsWatched(event)) {
                     TrackingScrobbleResult.Declined
-                } else if (
-                    item is SimklScrobbleItem.Episode &&
-                    progressPercent >= SIMKL_SCROBBLE_WATCHED_PERCENT &&
-                    SimklRewatchRepository.hasActiveRewatchFor(item)
-                ) {
+                } else if (inActiveRewatch && progressPercent < SIMKL_SCROBBLE_WATCHED_PERCENT) {
+                    TrackingScrobbleResult.Handled
+                } else if (inActiveRewatch && item is SimklScrobbleItem.Episode) {
                     // A plain completing stop marks the episode watched on the title's original
                     // watch, so during an active rewatch it reset the original to the rewatched
                     // episodes. Scrobble's own allow_rewatch cannot pin a session id and forks a new
