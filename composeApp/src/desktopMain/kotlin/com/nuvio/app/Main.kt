@@ -980,18 +980,23 @@ private fun configureDesktopChrome() {
 // Selects the Compose/Skiko UI graphics backend from the persisted renderer setting. Skiko
 // reads the skiko.renderApi system property once, when it initializes for the first window, so
 // this must run before any Compose window is shown and a change only takes effect on the next
-// launch. An explicit user choice always wins; if none is saved we default to Direct3D.
+// launch. Linux uses OpenGL, including when Direct3D was saved. Other hosts retain the saved
+// choice, falling back to Direct3D.
 // Best-effort — on any failure Skiko falls back to its own platform default.
 private fun configureDesktopRenderer() {
     runCatching {
         val stored = PlayerSettingsStorage.loadDesktopRendererApi()
             ?.let { runCatching { DesktopRendererApi.valueOf(it) }.getOrNull() }
-        // Unconditional fallback. It used to defer to whatever `skiko.renderApi` the launcher had
+        // Non-Linux fallback. It used to defer to whatever `skiko.renderApi` the launcher had
         // already set, which on Windows was the DIRECT3D jvmArg — so a fresh install ran Direct3D
         // while Settings displayed "OpenGL" (the value PlayerSettingsRepository defaults to) until
         // the user saved the setting once. Direct3D is the default (see DesktopRendererApi for why
         // OpenGL is opt-in); it must match the PlayerSettingsRepository default Settings displays.
-        val renderer = stored ?: DesktopRendererApi.D3D11
+        val renderer = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            DesktopRendererApi.OpenGL
+        } else {
+            stored ?: DesktopRendererApi.D3D11
+        }
         renderer?.let { System.setProperty("skiko.renderApi", it.skikoRenderApi) }
     }
 }

@@ -1395,7 +1395,12 @@ compose.desktop {
         // black-screened fullscreen playback on some drivers (see DesktopRendererApi). The
         // 2026-09-07 measurement still holds — D3D has a ~3 ms per-frame floor OpenGL does not —
         // which is why OpenGL stays selectable in Settings.
-        val skikoRenderApi = "DIRECT3D"
+        // Direct3D is unavailable on Linux; keep the existing default on other hosts.
+        val skikoRenderApi = if (System.getProperty("os.name").contains("linux", ignoreCase = true)) {
+            "OPENGL"
+        } else {
+            "DIRECT3D"
+        }
         jvmArgs += listOfNotNull(
             "-Dapple.awt.application.appearance=NSAppearanceNameDarkAqua",
             "-Dskiko.renderApi=$skikoRenderApi",
