@@ -9,13 +9,27 @@ peer/drawable or non-X11 toolkit produces a player error rather than an uncaught
 EDT exception. Native Wayland drawing surfaces are not supported.
 
 The unchanged shared `create(...)` signature receives that XID. libmpv uses
-`wid=<XID>`, `vo=gpu`, `gpu-api=opengl`, and `gpu-context=x11egl`. It renders in
+`wid=<XID>`, `vo=gpu-next`, `gpu-api=vulkan`, and `gpu-context=x11vk`. It renders in
 its own child window **inside the Canvas**, not a separate top-level player.
 No DISPLAY, screen number, or installation path is hardcoded. XWayland must be
 available and AWT/libmpv must connect to the same X server through the environment.
-libmpv must include the X11/EGL GPU context; no automatic Wayland backend is selected.
+libmpv must include gpu-next and the X11/Vulkan GPU context, with a usable Vulkan
+driver; no automatic Wayland backend is selected.
 The toolkit class check deliberately limits this development spike to OpenJDK's
 X11 toolkit; other/native Wayland AWT implementations require a later path.
+
+Vulkan avoids the Homebrew Mesa EGL path that rendered the main player through
+llvmpipe on the Bazzite/NVIDIA development system. No automatic renderer fallback
+is added: video-output initialization occurs during media loading, and the current
+error path does not reliably distinguish renderer failure from source failure.
+Retrying there would change player ownership and teardown. Other GPU/runtime
+combinations and an explicit compatibility fallback remain follow-up work; an
+ordered `x11vk,x11egl` context list alone is not a validated fallback.
+
+Hardware decoding is unchanged. The current Homebrew FFmpeg linked into libmpv
+lacks NVDEC/VAAPI/Vulkan hardware decoding; enabling those APIs is a separate
+runtime/dependency milestone. Seek previews retain their independent windowless
+`vo=null` decoder configuration.
 
 ## Implemented contract
 
@@ -53,8 +67,8 @@ into the Canvas: a transparent child can obscure the mpv surface with black
 rather than composite over its pixels. A separate ARGB toplevel lets the desktop
 compositor blend transparent areas over the video. GTK is app-paintable and clears
 to fully transparent; WebKit's background is also transparent. Hardware
-acceleration remains disabled for this spike; mpv's `wid`/OpenGL/X11-EGL path is
-unchanged. GDK frame synchronization stays disabled because an override-redirect
+acceleration remains disabled for this spike; the main video uses mpv's
+`wid`/Vulkan/X11 path independently. GDK frame synchronization stays disabled because an override-redirect
 window is not managed by the WM and receives no WM frame-drawn replies.
 
 Only the raw Canvas XID is retained, with no foreign `GdkWindow` wrapper or GDK

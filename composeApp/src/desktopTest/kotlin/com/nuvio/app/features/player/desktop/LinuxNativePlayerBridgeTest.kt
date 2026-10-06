@@ -60,6 +60,46 @@ class LinuxNativePlayerBridgeTest {
     }
 
     @Test
+    fun mainPlayerStartsVulkanX11DespiteConflictingCustomRendererOptions() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-renderer-")
+        val source = directory.resolve("video.y4m")
+        val mpvLog = directory.resolve("mpv.log")
+        val host = NativePlayerHost()
+        val restarted = CountDownLatch(1)
+        val error = AtomicReference<String?>(null)
+        var frame: Frame? = null
+        var handle = 0L
+        try {
+            writeLocalVideo(source)
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            handle = create(drawable, source.toString(), NativePlayerEventSink { type, _ ->
+                if (type == "playbackRestart") restarted.countDown()
+                if (type.startsWith("mpvStartupError:")) error.set(type)
+            }, extraMpvOptions = arrayOf(
+                "log-file=$mpvLog", "vo=gpu", "gpu-api=opengl", "gpu-context=x11egl",
+            ))
+            assertTrue(restarted.await(20, TimeUnit.SECONDS), "No Vulkan video restart: ${error.get()}")
+            NativePlayerBridge.dispose(handle)
+            handle = 0L
+            // Inspect real VO initialization, not source text or an NVIDIA-specific device name.
+            val log = Files.readString(mpvLog)
+            assertTrue(log.contains("[vo/gpu-next/vulkan]"), "Main VO did not use gpu-next/Vulkan")
+            assertTrue(log.contains("Initializing GPU context 'x11vk'"), "Main VO did not use the X11 context")
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            Files.deleteIfExists(mpvLog)
+            Files.deleteIfExists(source)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
     fun controllerShutsDownVideoBeforeCanvasPeerRemoval() {
         videoShutdownBeforePeerRemoval(replaceBeforeClose = false)
     }
@@ -1337,6 +1377,7 @@ class LinuxNativePlayerBridgeTest {
         source: String,
         sink: NativePlayerEventSink = NativePlayerEventSink { _, _ -> },
         controlsPageUrl: String = "",
+        extraMpvOptions: Array<String> = emptyArray(),
     ) =
         NativePlayerBridge.create(
             hostViewPtr = drawable,
@@ -1354,7 +1395,7 @@ class LinuxNativePlayerBridgeTest {
             // Keep null-output buffering below the assertions' tolerance. Its default 200 ms
             // queue otherwise offsets the paused audio-only playhead after a seek.
             // 50 ms also leaves room for null AO's 256-sample output chunks at 8 kHz.
-            extraMpvOptions = arrayOf("ao=null", "audio-display=no", "audio-buffer=0.05", "ao-null-buffer=0.05"),
+            extraMpvOptions = arrayOf("ao=null", "audio-display=no", "audio-buffer=0.05", "ao-null-buffer=0.05") + extraMpvOptions,
             eventSink = sink,
         )
 

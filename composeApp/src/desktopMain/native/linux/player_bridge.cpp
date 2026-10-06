@@ -614,9 +614,9 @@ JNI_METHOD(jlong, create)(
         option(player->mpv, "stop-screensaver", "no");
         option(player->mpv, "keep-open", "yes");
         option(player->mpv, "idle", "yes");
-        option(player->mpv, "vo", "gpu");
-        option(player->mpv, "gpu-api", "opengl");
-        option(player->mpv, "gpu-context", "x11egl");
+        option(player->mpv, "vo", "gpu-next");
+        option(player->mpv, "gpu-api", "vulkan");
+        option(player->mpv, "gpu-context", "x11vk");
         option(player->mpv, "wid", std::to_string(hostViewPtr));
         option(player->mpv, "pause", playWhenReady ? "no" : "yes");
         if (initialPositionMs > 0) {
