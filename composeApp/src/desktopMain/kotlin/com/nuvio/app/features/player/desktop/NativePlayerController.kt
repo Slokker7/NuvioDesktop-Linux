@@ -84,6 +84,11 @@ internal const val TRAILER_AUDIO_NORMALIZATION_FILTER = "dynaudnorm=f=150:g=15"
 internal class NativePlayerController(
     private val host: NativePlayerHost,
 ) : PlayerEngineController {
+    init {
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            host.onBeforeLinuxPeerRemoval = { dispose() }
+        }
+    }
     private var diagnosticsOverlayEnabled = false
     private data class AnimeShaderChoice(
         val mode: DesktopAnimeMode,
@@ -118,6 +123,7 @@ internal class NativePlayerController(
     @Volatile
     private var lastResizeMode: PlayerResizeMode? = null
     private val handleLock = Any()
+    private val linuxPendingDisposalHandles = mutableListOf<Long>() // Guarded by handleLock.
     private val attachGeneration = AtomicLong(0L)
     @Volatile
     private var disposed = false
@@ -314,17 +320,32 @@ internal class NativePlayerController(
             } else {
                 AwtNativeViewResolver.resolveNativeViewPointer(host)
             }
-            val previousHandle = takePlayerHandle()
+            // Stop UI commands targeting the outgoing player on the EDT, but retain
+            // its native lifetime separately so Linux peer removal cannot miss it.
+            val previousHandle = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+                unpublishLinuxPlayerHandle()
+                0L
+            } else takePlayerHandle()
             keyboardPanelOpen = false
             lastSentControlsStructureKey = null
             lastSentMediaSessionKey = null
             lastSentMpvMediaTitle = null
             thread(isDaemon = true, name = "Nuvio-Player-Attach") {
                 synchronized(nativeProcessLifecycleLock) {
+                    if (DesktopHostOs.current == DesktopHostOs.LINUX &&
+                        (disposed || generation != attachGeneration.get())) return@synchronized
                     // Replacement is intentionally sequential. Both operations remain on this
                     // worker, so a slow native shutdown delays the next stream without freezing
                     // Compose or allowing shared mpv dependencies to tear down under a new player.
-                    if (previousHandle != 0L) {
+                    if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+                        val failure = runCatching { drainLinuxPendingDisposals() }.exceptionOrNull()
+                        if (failure != null) {
+                            SwingUtilities.invokeLater {
+                                if (!disposed && generation == attachGeneration.get()) pending.onError(failure.message)
+                            }
+                            return@synchronized
+                        }
+                    } else if (previousHandle != 0L) {
                         runCatching { NativePlayerBridge.dispose(previousHandle) }
                     }
                     if (pending.tracePlaybackStart) PlaybackStartTrace.mark("nativeAttachThread")
@@ -415,6 +436,20 @@ internal class NativePlayerController(
         val value = handle
         handle = 0L
         value
+    }
+
+    private fun unpublishLinuxPlayerHandle() = synchronized(handleLock) {
+        if (handle != 0L) linuxPendingDisposalHandles.add(handle)
+        handle = 0L
+    }
+
+    // Caller owns nativeProcessLifecycleLock, including throughout native teardown.
+    // Never keep the UI-facing handleLock while waiting for GTK/mpv.
+    private fun drainLinuxPendingDisposals() {
+        val outgoing = synchronized(handleLock) {
+            linuxPendingDisposalHandles.toList().also { linuxPendingDisposalHandles.clear() }
+        }
+        outgoing.forEach { NativePlayerBridge.dispose(it) }
     }
 
     fun setControlCallbacks(
@@ -1297,10 +1332,24 @@ internal class NativePlayerController(
     }
 
     private fun disposePlayerHandle() {
-        val current = synchronized(handleLock) {
-            val value = handle
-            handle = 0L
-            value
+        val current = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            // Unpublish before waiting for lifecycle work. The queue retains every
+            // outgoing lifetime; acquiring the monitor also joins cancelled attach
+            // cleanup. Native callbacks only post to Swing, never wait for the EDT.
+            unpublishLinuxPlayerHandle()
+            synchronized(nativeProcessLifecycleLock) {
+                // An attach that was already publishing when disposal was requested
+                // must also be included before the Canvas peer can disappear.
+                unpublishLinuxPlayerHandle()
+                drainLinuxPendingDisposals()
+            }
+            0L
+        } else {
+            synchronized(handleLock) {
+                val value = handle
+                handle = 0L
+                value
+            }
         }
         keyboardPanelOpen = false
         lastSentControlsStructureKey = null

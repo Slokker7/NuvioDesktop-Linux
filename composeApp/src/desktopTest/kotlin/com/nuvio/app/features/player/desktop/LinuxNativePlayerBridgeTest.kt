@@ -14,6 +14,7 @@ import java.nio.ByteOrder
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -43,6 +44,272 @@ class LinuxNativePlayerBridgeTest {
             assertFailsWith<IllegalStateException> {
                 LinuxAwtViewResolver.resolveNativeViewPointer(Canvas())
             }
+        }
+    }
+
+    @Test
+    fun controllerShutsDownVideoBeforeCanvasPeerRemoval() {
+        videoShutdownBeforePeerRemoval(replaceBeforeClose = false)
+    }
+
+    @Test
+    fun sourceReplacementCannotHideLiveVideoFromPeerRemovalBarrier() {
+        videoShutdownBeforePeerRemoval(replaceBeforeClose = true)
+    }
+
+    @Test
+    fun replacementUnpublishesBeforeTeardownAndUiCommandsCannotTargetOutgoingPlayer() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val source = Files.createTempFile("nuvio-linux-replacement-", ".y4m")
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val firstRestart = CountDownLatch(1)
+        val replacementRestart = CountDownLatch(1)
+        val error = AtomicReference<String?>(null)
+        val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+        val lifecycleLock = NativePlayerController::class.java.getDeclaredField("nativeProcessLifecycleLock")
+            .apply { isAccessible = true }.get(null)
+        var frame: Frame? = null
+        try {
+            writeLocalVideo(source)
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                controller.setControlCallbacks({ false }, { type, _ ->
+                    if (type == "playbackRestart") firstRestart.countDown()
+                    false
+                }, { false }, { false })
+                attachLocalVideo(controller, source, error)
+            }
+            assertTrue(firstRestart.await(20, TimeUnit.SECONDS), "No initial video restart: ${error.get()}")
+            await { handleField.getLong(controller) != 0L }
+            val outgoing = handleField.getLong(controller)
+            val position = NativePlayerBridge.positionMs(outgoing)
+            assertTrue(NativePlayerBridge.isPaused(outgoing))
+
+            // Hold the real lifecycle monitor on the test thread, never on the EDT.
+            // The attach worker cannot destroy the outgoing player until this block ends.
+            synchronized(lifecycleLock) {
+                SwingUtilities.invokeAndWait {
+                    controller.setControlCallbacks({ false }, { type, _ ->
+                        if (type == "playbackRestart") replacementRestart.countDown()
+                        false
+                    }, { false }, { false })
+                    attachLocalVideo(controller, source, error)
+                }
+                // FIFO EDT dispatch ensures attachPending's unpublication has run.
+                SwingUtilities.invokeAndWait {
+                    assertEquals(0L, handleField.getLong(controller), "Outgoing handle is still published")
+                    controller.play()
+                    assertTrue(NativePlayerBridge.isPaused(outgoing), "UI play reached the outgoing player")
+                    controller.seekTo(1500L)
+                    controller.pause()
+                    assertEquals(position, NativePlayerBridge.positionMs(outgoing), "UI seek reached the outgoing player")
+                }
+                // It is unpublished but still native/alive, so the later lifecycle
+                // drain (rather than unpublication itself) must perform teardown.
+                assertTrue(NativePlayerBridge.isPaused(outgoing))
+            }
+
+            assertTrue(replacementRestart.await(20, TimeUnit.SECONDS), "No replacement restart: ${error.get()}")
+            await { handleField.getLong(controller) != 0L }
+            val replacement = handleField.getLong(controller)
+            assertTrue(replacement != outgoing)
+            assertEquals(null, error.get())
+            assertFailsWith<IllegalStateException> { NativePlayerBridge.positionMs(outgoing) }
+            SwingUtilities.invokeAndWait {
+                controller.play()
+                assertFalse(NativePlayerBridge.isPaused(replacement))
+                controller.pause()
+                frame?.dispose()
+                frame = null
+                controller.dispose()
+            }
+            assertFailsWith<IllegalStateException> { NativePlayerBridge.positionMs(replacement) }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            Files.deleteIfExists(source)
+        }
+    }
+
+    @Test
+    fun nativeX11ReservationRejectsAnotherControllerUntilFullDisposal() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val source = Files.createTempFile("nuvio-linux-x11-owner-", ".y4m")
+        val hostA = NativePlayerHost()
+        val hostB = NativePlayerHost()
+        val controllerA = NativePlayerController(hostA)
+        val controllerB = NativePlayerController(hostB)
+        val restartA = CountDownLatch(1)
+        val restartB = CountDownLatch(1)
+        val rejectedB = CountDownLatch(1)
+        val errorA = AtomicReference<String?>(null)
+        val errorB = AtomicReference<String?>(null)
+        val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+        var frameA: Frame? = null
+        var frameB: Frame? = null
+        try {
+            writeLocalVideo(source)
+            SwingUtilities.invokeAndWait {
+                frameA = videoFrame(hostA)
+                frameB = videoFrame(hostB)
+                controllerA.setControlCallbacks({ false }, { type, _ ->
+                    if (type == "playbackRestart") restartA.countDown()
+                    false
+                }, { false }, { false })
+                controllerB.setControlCallbacks({ false }, { type, _ ->
+                    if (type == "playbackRestart") restartB.countDown()
+                    false
+                }, { false }, { false })
+                attachLocalVideo(controllerA, source, errorA)
+            }
+            assertTrue(restartA.await(20, TimeUnit.SECONDS), "No player A restart: ${errorA.get()}")
+            await { handleField.getLong(controllerA) != 0L }
+            val handleA = handleField.getLong(controllerA)
+            SwingUtilities.invokeAndWait {
+                controllerB.attach(
+                    sourceUrl = source.toString(), sourceAudioUrl = null, sourceHeaders = emptyMap(),
+                    playWhenReady = false, initialPositionMs = 0L,
+                    nvidiaRtxSuperResolutionEnabled = false, nvidiaRtxHdrEnabled = false,
+                    onError = { errorB.set(it); rejectedB.countDown() },
+                )
+            }
+            assertTrue(rejectedB.await(10, TimeUnit.SECONDS), "Second controller was not rejected")
+            assertTrue(errorB.get()?.contains("Linux X11 player is already active") == true, "${errorB.get()}")
+            assertEquals(0L, handleField.getLong(controllerB))
+            assertEquals(1L, restartB.count)
+            assertTrue(NativePlayerBridge.isPaused(handleA), "Rejected creation damaged player A")
+            // Also bypass Kotlin serialization: the ownership rule must live in JNI.
+            var drawableB = 0L
+            SwingUtilities.invokeAndWait { drawableB = LinuxAwtViewResolver.resolveNativeViewPointer(hostB) }
+            val rejection = assertFailsWith<IllegalStateException> { create(drawableB, source.toString()) }
+            assertTrue(rejection.message?.contains("Linux X11 player is already active") == true)
+            SwingUtilities.invokeAndWait { controllerA.dispose(); controllerA.dispose() }
+            assertFailsWith<IllegalStateException> { NativePlayerBridge.positionMs(handleA) }
+            errorB.set(null)
+            SwingUtilities.invokeAndWait { attachLocalVideo(controllerB, source, errorB) }
+            assertTrue(restartB.await(20, TimeUnit.SECONDS), "No player B restart after release: ${errorB.get()}")
+            await { handleField.getLong(controllerB) != 0L }
+            val handleB = handleField.getLong(controllerB)
+            assertEquals(null, errorB.get())
+            // Disposing A again must not release B's newly acquired reservation.
+            SwingUtilities.invokeAndWait { controllerA.dispose() }
+            NativePlayerBridge.dispose(handleA)
+            assertFailsWith<IllegalStateException> { create(drawableB, source.toString()) }
+            SwingUtilities.invokeAndWait {
+                controllerB.play()
+                assertFalse(NativePlayerBridge.isPaused(handleB))
+                controllerB.pause()
+                frameB?.dispose()
+                frameB = null
+                controllerB.dispose()
+            }
+            assertFailsWith<IllegalStateException> { NativePlayerBridge.positionMs(handleB) }
+        } finally {
+            SwingUtilities.invokeAndWait {
+                controllerA.dispose(); controllerB.dispose(); frameA?.dispose(); frameB?.dispose()
+            }
+            Files.deleteIfExists(source)
+        }
+    }
+
+    @Test
+    fun partialInitializationFailureReleasesNativeX11Reservation() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val source = Files.createTempFile("nuvio-linux-partial-init-", ".wav")
+        val host = NativePlayerHost()
+        var frame: Frame? = null
+        var handle = 0L
+        try {
+            Files.write(source, silentWav())
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            // Valid mpv initialization, then a trapped GTK query of a nonexistent
+            // Canvas forces creation to unwind before a handle can be published.
+            val failure = assertFailsWith<IllegalStateException> {
+                create(0xffffffffL, source.toString(), controlsPageUrl = NativePlayerBridge.controlsPageUrl)
+            }
+            assertTrue(failure.message?.contains("Canvas disappeared before controls creation") == true, "${failure.message}")
+            val loaded = CountDownLatch(1)
+            handle = create(drawable, source.toString(), NativePlayerEventSink { type, _ ->
+                if (type == "fileLoaded") loaded.countDown()
+            })
+            assertTrue(loaded.await(10, TimeUnit.SECONDS), "Reservation leaked after partial initialization")
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            Files.deleteIfExists(source)
+        }
+    }
+
+    private fun videoShutdownBeforePeerRemoval(replaceBeforeClose: Boolean) {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val source = Files.createTempFile("nuvio-linux-shutdown-", ".y4m")
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val restarted = CountDownLatch(1)
+        val error = AtomicReference<String?>(null)
+        var frame: Frame? = null
+        try {
+            // Real video VO/X11 teardown, without a codec generator or network fixture.
+            writeLocalVideo(source)
+            SwingUtilities.invokeAndWait {
+                frame = Frame("Nuvio Linux video shutdown test").apply {
+                    isAutoRequestFocus = false
+                    focusableWindowState = false
+                    add(host)
+                    setSize(320, 180)
+                    isVisible = true
+                }
+                controller.setControlCallbacks({ false }, { type, _ ->
+                    if (type == "playbackRestart") restarted.countDown()
+                    false
+                }, { false }, { false })
+                controller.attach(
+                    sourceUrl = source.toString(), sourceAudioUrl = null, sourceHeaders = emptyMap(),
+                    playWhenReady = false, initialPositionMs = 0L,
+                    nvidiaRtxSuperResolutionEnabled = false, nvidiaRtxHdrEnabled = false,
+                    onError = { error.set(it ?: "Native attach failed") },
+                )
+            }
+            assertTrue(restarted.await(20, TimeUnit.SECONDS), "No real video restart: ${error.get()}")
+            assertEquals(null, error.get())
+            // Observe the published JNI handle without adding a production test-only API.
+            val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+            // mpv can restart before native create finishes creating the GTK HUD.
+            await { handleField.getLong(controller) != 0L }
+            val nativeHandle = handleField.getLong(controller)
+            assertTrue(nativeHandle != 0L)
+            if (replaceBeforeClose) {
+                SwingUtilities.invokeAndWait {
+                    controller.attach(
+                        sourceUrl = source.toString(), sourceAudioUrl = null, sourceHeaders = emptyMap(),
+                        playWhenReady = false, initialPositionMs = 0L,
+                        nvidiaRtxSuperResolutionEnabled = false, nvidiaRtxHdrEnabled = false,
+                        onError = { error.set(it ?: "Native replacement failed") },
+                    )
+                }
+            }
+            var barrierChecked = false
+            SwingUtilities.invokeAndWait {
+                val shutdown = checkNotNull(host.onBeforeLinuxPeerRemoval)
+                host.onBeforeLinuxPeerRemoval = {
+                    assertTrue(host.isDisplayable)
+                    shutdown()
+                    assertTrue(host.isDisplayable, "Canvas peer disappeared before native shutdown returned")
+                    assertFailsWith<IllegalStateException> { NativePlayerBridge.positionMs(nativeHandle) }
+                    barrierChecked = true
+                }
+                frame?.dispose()
+                frame = null
+                controller.dispose() // Idempotent Compose disposal after AWT disposal.
+            }
+            assertTrue(barrierChecked)
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            Files.deleteIfExists(source)
         }
     }
 
@@ -305,6 +572,36 @@ class LinuxNativePlayerBridgeTest {
             SwingUtilities.invokeAndWait { frame?.dispose() }
             for (file in listOf(script, page, source, subtitle)) Files.deleteIfExists(file)
             Files.deleteIfExists(directory)
+        }
+    }
+
+    private fun videoFrame(host: NativePlayerHost) = Frame("Nuvio Linux video lifecycle test").apply {
+        isAutoRequestFocus = false
+        focusableWindowState = false
+        add(host)
+        setSize(320, 180)
+        isVisible = true
+    }
+
+    private fun attachLocalVideo(
+        controller: NativePlayerController,
+        source: java.nio.file.Path,
+        error: AtomicReference<String?>,
+    ) = controller.attach(
+        sourceUrl = source.toString(), sourceAudioUrl = null, sourceHeaders = emptyMap(),
+        playWhenReady = false, initialPositionMs = 0L,
+        nvidiaRtxSuperResolutionEnabled = false, nvidiaRtxHdrEnabled = false,
+        onError = { error.set(it ?: "Native attach failed") },
+    )
+
+    private fun writeLocalVideo(source: java.nio.file.Path) {
+        Files.newOutputStream(source).use { output ->
+            output.write("YUV4MPEG2 W64 H64 F10:1 Ip A1:1 C420jpeg\n".toByteArray())
+            val pixels = ByteArray(64 * 64 * 3 / 2) { 128.toByte() }
+            repeat(30) {
+                output.write("FRAME\n".toByteArray())
+                output.write(pixels)
+            }
         }
     }
 

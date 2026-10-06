@@ -26,6 +26,11 @@ public:
         return instance;
     }
 
+    static void syncIfStarted(std::function<void()> action) {
+        if (auto *thread = started_.load()) thread->sync(std::move(action));
+        else action(); // Do not initialize GTK for an audio-only/no-HUD player.
+    }
+
     void post(std::function<void()> action) {
         auto *task = new std::function<void()>(std::move(action));
         GSource *source = g_idle_source_new();
@@ -72,8 +77,10 @@ private:
         ready.get();
         // Capture the actual owner using the same dispatcher.
         sync([this] { owner_ = std::this_thread::get_id(); });
+        started_ = this;
     }
     std::thread::id owner_;
+    inline static std::atomic<GtkThread *> started_{nullptr};
 };
 
 std::string jsString(const std::string &value) {
@@ -418,4 +425,8 @@ void LinuxControlsOverlay::close() {
     state_->closing = true; // Suppress messages/queued tasks before synchronous GTK teardown.
     GtkThread::get().sync([self = state_] { self->destroy(); });
     state_.reset();
+}
+
+void LinuxControlsOverlay::finishPlayerShutdown(std::function<void()> action) {
+    GtkThread::syncIfStarted(std::move(action));
 }

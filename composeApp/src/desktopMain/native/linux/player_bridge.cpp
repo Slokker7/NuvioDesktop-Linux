@@ -2,6 +2,7 @@
 #include <mpv/client.h>
 #include <glib.h>
 #include "controls_overlay.h"
+#include "awt_x11_lifecycle.h"
 
 #include <algorithm>
 #include <atomic>
@@ -185,6 +186,10 @@ template<class F> auto guarded(JNIEnv *env, F action) -> decltype(action()) {
 struct Player;
 std::string subtitleTracksJson(Player &player);
 
+// Xlib's error handler belongs to the process, not to an mpv handle. Reserve
+// the whole lifetime, including partial initialization and final restoration.
+std::atomic<bool> x11PlayerLifetimeReserved{false};
+
 struct Player {
     mpv_handle *mpv = nullptr;
     JavaVM *vm = nullptr;
@@ -198,6 +203,14 @@ struct Player {
     std::atomic<bool> fileReady{false};
     std::atomic<bool> ended{false};
     bool playbackStarted = false; // Only accessed by the event thread.
+    bool ownsX11Lifetime = false;
+
+    void reserveX11Lifetime() {
+        bool expected = false;
+        if (!x11PlayerLifetimeReserved.compare_exchange_strong(expected, true))
+            throw std::runtime_error("Linux X11 player is already active; dispose it before creating another player.");
+        ownsX11Lifetime = true;
+    }
 
     ~Player() { close(); }
 
@@ -216,7 +229,23 @@ struct Player {
         if (events.joinable()) events.join();
         std::lock_guard<std::mutex> lock(operations);
         if (mpv) {
-            mpv_terminate_destroy(mpv);
+            JNIEnv *env = nullptr;
+            int status = vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+            bool attached = status == JNI_EDETACHED;
+            if (status != JNI_OK && (!attached ||
+                vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void **>(&env), nullptr) != JNI_OK))
+                throw std::runtime_error("Unable to acquire JVM environment for Linux player shutdown.");
+            {
+                // The overlay is closed and the event thread joined: neither can
+                // require the EDT or acquire AWT's lock while we wait for GTK/mpv.
+                LinuxAwtX11Lifecycle awtLock(env);
+                auto terminate = [this] {
+                    mpv_terminate_destroy(mpv);
+                    LinuxAwtX11Lifecycle::restoreToolkitHandler();
+                };
+                LinuxControlsOverlay::finishPlayerShutdown(terminate);
+            }
+            if (attached) vm->DetachCurrentThread();
             mpv = nullptr;
         }
         std::lock_guard<std::mutex> callbackLock(callbacks);
@@ -230,6 +259,12 @@ struct Player {
                 if (attached) vm->DetachCurrentThread();
             }
             sink = nullptr;
+        }
+        // A rejected second create owns nothing. Repeated close must not release
+        // a reservation subsequently acquired by another player.
+        if (ownsX11Lifetime) {
+            ownsX11Lifetime = false;
+            x11PlayerLifetimeReserved = false;
         }
     }
 
@@ -485,7 +520,9 @@ JNI_METHOD(jlong, create)(
         if (source.empty()) throw std::runtime_error("Linux playback source URL is empty.");
         if (!eventSink) throw std::runtime_error("Native player event sink is required.");
         auto player = std::make_shared<Player>();
+        player->reserveX11Lifetime();
         if (env->GetJavaVM(&player->vm) != JNI_OK) throw std::runtime_error("GetJavaVM failed.");
+        LinuxAwtX11Lifecycle::prepare(env);
         player->sink = env->NewGlobalRef(eventSink);
         if (!player->sink) throw std::runtime_error("Unable to retain native player event sink.");
         jclass sinkClass = env->GetObjectClass(eventSink);

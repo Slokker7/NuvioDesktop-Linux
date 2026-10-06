@@ -11,6 +11,9 @@ internal class NativePlayerHost : Canvas() {
     var onFirstFullSizePaint: (() -> Unit)? = null
     private var firstPaintNotified = false
     private var firstFullSizePaintNotified = false
+    // Linux mpv owns an X11 child of this peer. Release it before AWT destroys
+    // the Canvas (and then its parent window), regardless of Compose disposal order.
+    var onBeforeLinuxPeerRemoval: (() -> Unit)? = null
 
     init {
         background = Color.BLACK
@@ -42,6 +45,7 @@ internal class NativePlayerHost : Canvas() {
     }
 
     override fun removeNotify() {
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) onBeforeLinuxPeerRemoval?.invoke()
         onDisplayableChanged?.invoke(false)
         firstPaintNotified = false
         firstFullSizePaintNotified = false

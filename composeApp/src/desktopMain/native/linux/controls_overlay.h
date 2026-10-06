@@ -18,6 +18,8 @@ public:
     void runJavaScript(const std::string &script);
     void setCursorHidden(bool hidden);
     void close();
+    // Serialize mpv's process-global X error-handler teardown with GTK's traps.
+    static void finishPlayerShutdown(std::function<void()> action);
 
 private:
     struct State;
