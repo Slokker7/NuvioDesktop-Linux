@@ -754,6 +754,13 @@ JNI_METHOD(void, runJavaScript)(JNIEnv *env, jobject, jlong handle, jstring scri
 JNI_METHOD(void, setCursorHidden)(JNIEnv *env, jobject, jlong handle, jboolean hidden) {
     withPlayer(env, handle, [&](Player &p) { if (p.controls) p.controls->setCursorHidden(hidden); });
 }
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_LinuxPlayerControlsBridge_setWindowFocused(
+    JNIEnv *env, jobject, jlong handle, jboolean focused) {
+    withPlayer(env, handle, [&](Player &p) {
+        if (p.controls) p.controls->setWindowFocused(focused == JNI_TRUE);
+    });
+}
 // Media session integration is still absent.
 JNI_METHOD(void, setMediaSessionMetadata)(JNIEnv *, jobject, jlong, jstring, jstring, jstring) {}
 // X11's mpv VO owns expose/resize/redraw, unlike the Windows D3D redraw workaround.

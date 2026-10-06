@@ -17,6 +17,7 @@ public:
     void updateControls(const std::string &json);
     void runJavaScript(const std::string &script);
     void setCursorHidden(bool hidden);
+    void setWindowFocused(bool focused);
     void close();
     // Serialize mpv's process-global X error-handler teardown with GTK's traps.
     static void finishPlayerShutdown(std::function<void()> action);

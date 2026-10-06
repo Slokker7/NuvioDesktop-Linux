@@ -121,6 +121,7 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
     GCancellable *evaluation = nullptr;
     guint timer = 0;
     bool ready = false;
+    bool hostWindowFocused = false; // GTK thread only; start hidden until AWT supplies focus.
     int x = 0, y = 0, width = 0, height = 0, lastScale = 0;
     Message message;
     Snapshot snapshot;
@@ -222,8 +223,9 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
         XWindowAttributes attributes{};
         int rootX = 0, rootY = 0;
         if (!hostGeometry(attributes, rootX, rootY)) return false;
-        // A separate toplevel must not remain visible when its Canvas is unmapped.
-        if (attributes.map_state != IsViewable) {
+        // Override-redirect bypasses WM stacking: a viewable Canvas alone does
+        // not mean Nuvio is foreground. Only AWT's owning-window focus maps HUD.
+        if (!hostWindowFocused || attributes.map_state != IsViewable) {
             gtk_widget_hide(window);
             return true;
         }
@@ -284,6 +286,7 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
         gtk_window_set_skip_taskbar_hint(GTK_WINDOW(window), TRUE);
         gtk_window_set_skip_pager_hint(GTK_WINDOW(window), TRUE);
         gtk_window_set_focus_on_map(GTK_WINDOW(window), FALSE);
+        gtk_window_set_accept_focus(GTK_WINDOW(window), FALSE);
         gtk_widget_set_visual(window, visual);
         gtk_widget_set_app_paintable(window, TRUE);
         g_signal_connect(window, "draw", G_CALLBACK(+[](GtkWidget *, cairo_t *cr, gpointer) -> gboolean {
@@ -321,13 +324,13 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
             std::fprintf(stderr, "Linux controls load failed: %s\n", error->message);
             return FALSE;
         }), nullptr);
-        g_signal_connect(view, "button-press-event", G_CALLBACK(+[](GtkWidget *widget, GdkEventButton *event,
-            gpointer data) -> gboolean {
-            auto &self = *static_cast<State *>(data);
+        g_signal_connect(view, "button-press-event", G_CALLBACK(+[](GtkWidget *widget, GdkEventButton *,
+            gpointer) -> gboolean {
+            // Internal WebView focus is enough for mouse controls. Leave X11
+            // keyboard focus in AWT so a HUD click cannot hide its own window.
             gtk_widget_grab_focus(widget);
-            gdk_window_focus(gtk_widget_get_window(self.window), event->time);
             return FALSE;
-        }), this);
+        }), nullptr);
         gtk_widget_realize(window);
         GdkWindow *native = gtk_widget_get_window(window);
         gdk_x11_display_error_trap_push(display);
@@ -344,8 +347,10 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
         gdk_display_flush(display);
         timer = g_timeout_add(250, [](gpointer data) -> gboolean {
             auto &self = *static_cast<State *>(data);
-            if (self.closing) return G_SOURCE_REMOVE;
-            if (!self.layout()) { self.destroy(); return G_SOURCE_REMOVE; }
+            // The callback owns removal when it returns REMOVE; do not retain
+            // its expired ID for the synchronous shutdown queued behind it.
+            if (self.closing) { self.timer = 0; return G_SOURCE_REMOVE; }
+            if (!self.layout()) { self.timer = 0; self.destroy(); return G_SOURCE_REMOVE; }
             try { self.syncPlayback(); }
             catch (const std::exception &error) { std::fprintf(stderr, "Linux controls state: %s\n", error.what()); }
             return G_SOURCE_CONTINUE;
@@ -425,6 +430,16 @@ void LinuxControlsOverlay::close() {
     state_->closing = true; // Suppress messages/queued tasks before synchronous GTK teardown.
     GtkThread::get().sync([self = state_] { self->destroy(); });
     state_.reset();
+}
+
+void LinuxControlsOverlay::setWindowFocused(bool focused) {
+    GtkThread::get().post([self = state_, focused] {
+        if (self->closing || !self->window) return;
+        self->hostWindowFocused = focused;
+        if (!focused) gtk_widget_hide(self->window);
+        else if (!self->layout(true)) self->destroy();
+        gdk_display_flush(self->display);
+    });
 }
 
 void LinuxControlsOverlay::finishPlayerShutdown(std::function<void()> action) {

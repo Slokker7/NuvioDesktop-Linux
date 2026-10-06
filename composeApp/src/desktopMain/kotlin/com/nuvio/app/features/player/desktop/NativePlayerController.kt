@@ -127,6 +127,13 @@ internal class NativePlayerController(
     private val attachGeneration = AtomicLong(0L)
     @Volatile
     private var disposed = false
+    private val linuxWindowFocus = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+        LinuxPlayerWindowFocus(host) { focused ->
+            handle.takeIf { !disposed && it != 0L }?.let {
+                LinuxPlayerControlsBridge.setWindowFocused(it, focused)
+            }
+        }
+    } else null
     @Volatile
     private var pendingSource: PendingSource? = null
     private val pendingMpvProperties = linkedMapOf<String, String>()
@@ -404,6 +411,11 @@ internal class NativePlayerController(
                     if (!keepHandle) {
                         NativePlayerBridge.dispose(newHandle)
                         return@synchronized
+                    }
+                    if (DesktopHostOs.current == DesktopHostOs.LINUX) SwingUtilities.invokeLater {
+                        if (!disposed && generation == attachGeneration.get() && handle == newHandle) {
+                            LinuxPlayerControlsBridge.setWindowFocused(newHandle, linuxWindowFocus?.focused == true)
+                        }
                     }
                     if (pending.tracePlaybackStart) PlaybackStartTrace.mark("nativeCreateReturned")
                     // Carry the last-set volume onto the fresh mpv instance so a new episode doesn't
@@ -1253,6 +1265,7 @@ internal class NativePlayerController(
 
     fun dispose() {
         disposed = true
+        linuxWindowFocus?.close()
         attachGeneration.incrementAndGet()
         pendingSource = null
         host.onPeerReady = null

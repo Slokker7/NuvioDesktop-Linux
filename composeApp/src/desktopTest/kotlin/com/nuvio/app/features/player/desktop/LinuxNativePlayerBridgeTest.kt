@@ -9,10 +9,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.awt.Canvas
 import java.awt.Frame
 import java.awt.GraphicsEnvironment
+import java.awt.event.WindowEvent
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
@@ -422,6 +424,77 @@ class LinuxNativePlayerBridgeTest {
     }
 
     @Test
+    fun windowFocusEventsHideAndRestoreHudWithoutReplacingPlayer() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val source = Files.createTempFile("nuvio-linux-hud-focus-", ".y4m")
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val restart = CountDownLatch(1)
+        val visibility = LinkedBlockingQueue<Int>()
+        val error = AtomicReference<String?>(null)
+        val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+        var frame: Frame? = null
+        try {
+            writeLocalVideo(source)
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                controller.setControlCallbacks({ false }, { type, value ->
+                    if (type == "playbackRestart") restart.countDown()
+                    if (type == "overlayFocusState") visibility.add(value.toInt())
+                    false
+                }, { false }, { false })
+                attachLocalVideo(controller, source, error)
+            }
+            assertTrue(restart.await(20, TimeUnit.SECONDS), "No video restart: ${error.get()}")
+            await { handleField.getLong(controller) != 0L }
+            val handle = handleField.getLong(controller)
+            NativePlayerBridge.runJavaScript(handle, """
+                window.focusTestMarker = 42;
+                const reportFocusVisibility = () => window.webkit.messageHandlers.player.postMessage({
+                    type:'overlayFocusState', value:window.focusTestMarker === 42 ? (document.hidden ? 0 : 1) : -1
+                });
+                document.addEventListener('visibilitychange', reportFocusVisibility);
+                reportFocusVisibility();
+            """.trimIndent())
+            assertEquals(0, visibility.poll(10, TimeUnit.SECONDS), "Unfocused HUD was initially visible")
+            // Exercise the actual registered AWT -> controller -> JNI -> GTK path
+            // without stealing the user's desktop focus. Real Mutter focus needs manual testing.
+            repeat(3) {
+                SwingUtilities.invokeAndWait {
+                    val owner = requireNotNull(frame)
+                    assertTrue(owner.windowFocusListeners.isNotEmpty(), "No owning-window focus listener")
+                    owner.windowFocusListeners.forEach { listener ->
+                        listener.windowGainedFocus(WindowEvent(owner, WindowEvent.WINDOW_GAINED_FOCUS))
+                    }
+                }
+                assertEquals(1, visibility.poll(10, TimeUnit.SECONDS), "HUD did not map on focus gain")
+                SwingUtilities.invokeAndWait {
+                    controller.play()
+                    assertFalse(NativePlayerBridge.isPaused(handle))
+                    controller.pause()
+                    val owner = requireNotNull(frame)
+                    owner.windowFocusListeners.forEach { listener ->
+                        listener.windowLostFocus(WindowEvent(owner, WindowEvent.WINDOW_LOST_FOCUS))
+                    }
+                }
+                assertEquals(0, visibility.poll(10, TimeUnit.SECONDS), "HUD did not unmap on focus loss")
+                assertEquals(handle, handleField.getLong(controller), "Focus change replaced the player")
+                assertTrue(NativePlayerBridge.isPaused(handle))
+            }
+            SwingUtilities.invokeAndWait {
+                controller.dispose()
+                assertTrue(requireNotNull(frame).windowFocusListeners.isEmpty(), "Focus listener leaked after disposal")
+                frame?.dispose()
+                frame = null
+            }
+            assertFailsWith<IllegalStateException> { NativePlayerBridge.positionMs(handle) }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            Files.deleteIfExists(source)
+        }
+    }
+
+    @Test
     fun x11WebKitOverlayLoadsSiblingAssetsAndDeliversQueuedMessages() {
         if (!enabled()) return
         if (GraphicsEnvironment.isHeadless()) {
@@ -479,6 +552,8 @@ class LinuxNativePlayerBridgeTest {
                     type == "overlaySubtitleTracks" && value == 1.0 -> subtitleTracksDelivered.countDown()
                 }
             }, page.toUri().toString())
+            // Direct JNI fixtures have no controller to supply owning-window focus.
+            LinuxPlayerControlsBridge.setWindowFocused(handle, true)
             NativePlayerBridge.updateControls(handle, """{"sequence":1}""")
             NativePlayerBridge.updateControls(
                 handle,
@@ -551,6 +626,7 @@ class LinuxNativePlayerBridgeTest {
                 if (type == "overlayHostLossArmed") hostLossArmed.countDown()
                 if (type == "overlayAfterHostLoss") afterHostLoss.countDown()
             }, page.toUri().toString())
+            LinuxPlayerControlsBridge.setWindowFocused(handle, true)
             NativePlayerBridge.runJavaScript(
                 handle, "window.webkit.messageHandlers.player.postMessage({type:'overlayRecreated',value:1})",
             )
