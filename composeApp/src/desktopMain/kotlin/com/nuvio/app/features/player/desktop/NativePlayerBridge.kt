@@ -26,9 +26,18 @@ internal fun interface NativePlayerEventSink {
 
 internal object NativePlayerBridge {
     private var loadedRuntimeDir: File? = null
+    private var linuxLoadFailure: Throwable? = null
 
     init {
-        loadNativeLibrary()
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            // A missing development bridge must not poison class initialization or app startup.
+            runCatching { loadNativeLibrary() }.onFailure { error ->
+                linuxLoadFailure = error
+                log.w(error) { "Linux native player bridge unavailable; in-app playback remains disabled." }
+            }
+        } else {
+            loadNativeLibrary()
+        }
     }
 
     external fun create(
@@ -173,10 +182,19 @@ internal object NativePlayerBridge {
      * to pay the DLL extraction/link cost on a thread of their choosing instead of wherever the
      * first real bridge call happens to land (historically the AWT event thread).
      */
-    fun ensureNativeLibraryLoaded() = Unit
+    fun ensureNativeLibraryLoaded() {
+        linuxLoadFailure?.let { throw IllegalStateException("Linux native player bridge is unavailable.", it) }
+    }
 
     private fun loadNativeLibrary() {
         val platform = DesktopHostOs.current
+        if (platform == DesktopHostOs.LINUX) {
+            val library = findLocalBuildLibrary(nativeDirectoryName(platform), nativeLibraryName(platform))
+                ?: error("Linux native player bridge not found; run :composeApp:buildLinuxPlayerBridge first.")
+            System.load(library.absolutePath)
+            loadedRuntimeDir = library.parentFile
+            return
+        }
         require(platform == DesktopHostOs.MACOS || platform == DesktopHostOs.WINDOWS) {
             "Native desktop playback is not implemented for $platform yet."
         }

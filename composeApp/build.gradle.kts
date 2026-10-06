@@ -298,6 +298,52 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
 
 val isMacHost = System.getProperty("os.name").contains("mac", ignoreCase = true)
 val isWindowsHost = System.getProperty("os.name").contains("win", ignoreCase = true)
+val isLinuxHost = System.getProperty("os.name").contains("linux", ignoreCase = true)
+val linuxPlayerBridgeSource = layout.projectDirectory.dir("src/desktopMain/native/linux")
+val linuxPlayerBridgeBuildDir = layout.buildDirectory.dir("native/linux")
+val linuxMpvRoot = providers.gradleProperty("nuvio.linux.mpvRoot")
+    .orElse(providers.environmentVariable("MPV_ROOT"))
+    .orElse("")
+val buildLinuxPlayerBridge = tasks.register("buildLinuxPlayerBridge") {
+    description = "Builds the Linux JNI/libmpv bridge for local development (MPV_ROOT optional)."
+    notCompatibleWithConfigurationCache("Configures and builds a host-local Linux bridge with CMake.")
+    enabled = isLinuxHost
+    inputs.dir(linuxPlayerBridgeSource)
+    inputs.property("mpvRoot", linuxMpvRoot)
+    inputs.property("javaHome", providers.systemProperty("java.home"))
+    outputs.file(linuxPlayerBridgeBuildDir.map { it.file("libplayer_bridge.so") })
+    // Let CMake/Ninja track installed libmpv headers and libraries, including upgrades in place.
+    outputs.upToDateWhen { false }
+    doLast {
+        val buildDir = linuxPlayerBridgeBuildDir.get().asFile
+        fun run(vararg command: String) {
+            val process = ProcessBuilder(*command).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().readText()
+            val code = process.waitFor()
+            if (code != 0) {
+                throw GradleException("Linux player bridge build failed (exit $code):\n$output")
+            }
+            logger.lifecycle(output.trimEnd())
+        }
+        run(
+            "cmake", "-S", linuxPlayerBridgeSource.asFile.absolutePath,
+            "-B", buildDir.absolutePath, "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DJAVA_HOME=${providers.systemProperty("java.home").get()}",
+            "-DMPV_ROOT=${linuxMpvRoot.get()}",
+        )
+        run("cmake", "--build", buildDir.absolutePath, "--parallel")
+    }
+}
+
+// Explicit opt-in: normal runs/tests must not require the unfinished Linux player bridge.
+if (isLinuxHost && providers.gradleProperty("nuvio.linux.nativeSmokeTest").orNull == "true") {
+    tasks.withType<Test>().matching { it.name == "desktopTest" }.configureEach {
+        dependsOn(buildLinuxPlayerBridge)
+        systemProperty("nuvio.linux.nativeSmokeTest", "true")
+    }
+}
+
 val mpvKitDir = providers.gradleProperty("nuvio.mpvkit.dir")
     .orElse(rootProject.layout.projectDirectory.dir("MPVKit").asFile.absolutePath)
 val macosPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/macos/player_bridge.mm")
