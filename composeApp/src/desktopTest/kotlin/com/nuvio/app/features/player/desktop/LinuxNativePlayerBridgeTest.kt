@@ -35,6 +35,8 @@ class LinuxNativePlayerBridgeTest {
         assertTrue(NativePlayerBridge.runtimeDllDir()?.resolve("libplayer_bridge.so")?.isFile == true)
         NativePlayerBridge.dispose(0L)
         assertEquals("[]", NativePlayerBridge.subtitleTracksJson(0L))
+        assertEquals("[]", NativePlayerBridge.audioTracksJson(0L))
+        assertFalse(NativePlayerBridge.selectAudioTrack(0L, 1))
         assertFailsWith<IllegalStateException> { create(0L, "") }
         assertFailsWith<IllegalStateException> { NativePlayerBridge.positionMs(Long.MAX_VALUE) }
     }
@@ -284,6 +286,8 @@ class LinuxNativePlayerBridgeTest {
             await { handleField.getLong(controller) != 0L }
             val nativeHandle = handleField.getLong(controller)
             assertTrue(nativeHandle != 0L)
+            assertEquals("[]", NativePlayerBridge.audioTracksJson(nativeHandle), "Video-only fixture has audio tracks")
+            assertFalse(NativePlayerBridge.selectAudioTrack(nativeHandle, 1))
             if (replaceBeforeClose) {
                 SwingUtilities.invokeAndWait {
                     controller.attach(
@@ -352,6 +356,13 @@ class LinuxNativePlayerBridgeTest {
             })
             assertTrue(handle != 0L)
             assertTrue(loaded.await(10, TimeUnit.SECONDS), "No fileLoaded event for local WAV")
+            val audio = Json.parseToJsonElement(NativePlayerBridge.audioTracksJson(handle)).jsonArray.single().jsonObject
+            assertAudioTrackSchema(audio)
+            assertEquals(0, audio.getValue("index").jsonPrimitive.int)
+            assertEquals("Track 1 (Mono, WAV)", audio.getValue("label").jsonPrimitive.content)
+            assertEquals("", audio.getValue("language").jsonPrimitive.content)
+            assertTrue(audio.getValue("selected").jsonPrimitive.boolean)
+            assertTrue(NativePlayerBridge.selectAudioTrack(handle, audio.getValue("id").jsonPrimitive.content.toInt()))
             await { NativePlayerBridge.durationMs(handle) in 4900L..5100L }
             assertTrue(NativePlayerBridge.isPaused(handle))
             await { NativePlayerBridge.positionMs(handle) in 900L..1100L }
@@ -420,6 +431,163 @@ class LinuxNativePlayerBridgeTest {
             SwingUtilities.invokeAndWait { frame?.dispose() }
             Files.deleteIfExists(source)
             subtitles.forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun multipleAudioTracksReachHudAndSelectionAndReplacementUseLiveTrackIds() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-audio-tracks-")
+        val source = directory.resolve("two-tracks.mka")
+        val single = directory.resolve("single.wav")
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val loaded = CountDownLatch(1)
+        val selectedFromHud = CountDownLatch(1)
+        val selectionResult = AtomicReference<Boolean?>(null)
+        val states = LinkedBlockingQueue<Int>()
+        val menuRows = LinkedBlockingQueue<Int>()
+        val error = AtomicReference<String?>(null)
+        val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+        var frame: Frame? = null
+        var recreated = 0L
+        try {
+            LinuxAudioTrackFixture.write(source)
+            Files.write(single, silentWav())
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                controller.setControlCallbacks({ false }, { type, value ->
+                    when (type) {
+                        "fileLoaded" -> loaded.countDown()
+                        "audioParityState" -> states.add(value.toInt())
+                        "audioParityMenu" -> menuRows.add(value.toInt())
+                        "selectAudioTrack" -> {
+                            // Same logical-index resolution used by the shared player runtime.
+                            selectionResult.set(controller.selectAudioTrack(value.toInt()))
+                            selectedFromHud.countDown()
+                            return@setControlCallbacks true
+                        }
+                    }
+                    false
+                }, { false }, { false })
+                attachLocalVideo(controller, source, error)
+            }
+            assertTrue(loaded.await(20, TimeUnit.SECONDS), "No multi-audio fileLoaded: ${error.get()}")
+            await { handleField.getLong(controller) != 0L }
+            val handle = handleField.getLong(controller)
+            fun tracks(current: Long) = Json.parseToJsonElement(NativePlayerBridge.audioTracksJson(current)).jsonArray
+            val initialJson = NativePlayerBridge.audioTracksJson(handle)
+            assertTrue(initialJson.all { it.code < 128 }, "Audio JSON is unsafe for JNI NewStringUTF")
+            val initial = tracks(handle)
+            assertEquals(2, initial.size)
+            initial.forEachIndexed { index, track ->
+                assertAudioTrackSchema(track.jsonObject)
+                assertEquals(index, track.jsonObject.getValue("index").jsonPrimitive.int)
+                assertFalse(track.jsonObject.getValue("forced").jsonPrimitive.boolean)
+            }
+            assertEquals(LinuxAudioTrackFixture.title.trim() + " (WAV)", initial[0].jsonObject.getValue("label").jsonPrimitive.content)
+            assertEquals("eng", initial[0].jsonObject.getValue("language").jsonPrimitive.content)
+            // Matroska PCM carries a channel count but no layout mask. mpv exposes
+            // the undecoded layout as unknown2; Windows preserves that raw name.
+            assertEquals("fra (unknown2, WAV)", initial[1].jsonObject.getValue("label").jsonPrimitive.content)
+            assertEquals("fra", initial[1].jsonObject.getValue("language").jsonPrimitive.content)
+            val ids = initial.map { it.jsonObject.getValue("id").jsonPrimitive.content.toInt() }
+            assertEquals(listOf(1, 2), ids, "Fixture must distinguish logical indices from mpv IDs")
+            assertEquals(listOf(true, false), initial.map { it.jsonObject.getValue("selected").jsonPrimitive.boolean })
+
+            installAudioHudProbe(handle)
+            awaitAudioHudState(states, 20)
+            NativePlayerBridge.runJavaScript(handle, """
+                document.querySelector('[data-command="audio"]').click();
+                const rows = document.querySelectorAll('#audioTrackList .track-row');
+                window.webkit.messageHandlers.player.postMessage({type:'audioParityMenu',value:rows.length});
+                if (rows.length === 2) rows[1].click();
+            """.trimIndent())
+            assertEquals(2, menuRows.poll(10, TimeUnit.SECONDS), "Existing Audio menu did not enumerate both tracks")
+            assertTrue(selectedFromHud.await(10, TimeUnit.SECONDS), "HUD did not send audio selection")
+            assertEquals(true, selectionResult.get())
+            await { tracks(handle).single { it.jsonObject.getValue("selected").jsonPrimitive.boolean }
+                .jsonObject.getValue("id").jsonPrimitive.content.toInt() == ids[1] }
+            awaitAudioHudState(states, 21)
+            for (invalid in listOf(-1, 0, Int.MAX_VALUE)) assertFalse(NativePlayerBridge.selectAudioTrack(handle, invalid))
+            assertTrue(tracks(handle)[1].jsonObject.getValue("selected").jsonPrimitive.boolean)
+            assertTrue(NativePlayerBridge.selectAudioTrack(handle, ids[0]))
+            awaitAudioHudState(states, 20)
+
+            // Replace the source in the real controller; its new native HUD must
+            // report one current track, with no state cached from the old media.
+            SwingUtilities.invokeAndWait { attachLocalVideo(controller, single, error) }
+            await { handleField.getLong(controller).let { it != 0L && it != handle } }
+            val replacement = handleField.getLong(controller)
+            await { tracks(replacement).size == 1 }
+            assertFalse(NativePlayerBridge.selectAudioTrack(replacement, ids[1]), "Stale source ID was accepted")
+            states.clear()
+            installAudioHudProbe(replacement)
+            awaitAudioHudState(states, 10)
+            SwingUtilities.invokeAndWait {
+                assertEquals(1, controller.getAudioTracks().size)
+                assertFalse(controller.selectAudioTrack(1))
+                controller.dispose()
+            }
+            assertEquals(null, error.get())
+            var drawable = 0L
+            SwingUtilities.invokeAndWait { drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host) }
+            val recreatedLoaded = CountDownLatch(1)
+            recreated = create(drawable, single.toString(), NativePlayerEventSink { type, _ ->
+                if (type == "fileLoaded") recreatedLoaded.countDown()
+            })
+            assertTrue(recreatedLoaded.await(10, TimeUnit.SECONDS))
+            assertEquals(1, tracks(recreated).size)
+            assertTrue(tracks(recreated).single().jsonObject.getValue("selected").jsonPrimitive.boolean)
+            assertFalse(NativePlayerBridge.selectAudioTrack(recreated, ids[1]))
+            NativePlayerBridge.dispose(recreated)
+            recreated = 0L
+        } finally {
+            if (recreated != 0L) NativePlayerBridge.dispose(recreated)
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            Files.deleteIfExists(source)
+            Files.deleteIfExists(single)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    private fun assertAudioTrackSchema(track: kotlinx.serialization.json.JsonObject) {
+        assertEquals(setOf("index", "id", "label", "language", "selected", "forced"), track.keys)
+        assertFalse(track.getValue("index").jsonPrimitive.isString)
+        assertTrue(track.getValue("id").jsonPrimitive.isString)
+        assertTrue(track.getValue("id").jsonPrimitive.content.toLongOrNull() != null)
+        assertTrue(track.getValue("label").jsonPrimitive.isString)
+        assertTrue(track.getValue("language").jsonPrimitive.isString)
+        for (key in listOf("selected", "forced")) {
+            assertFalse(track.getValue(key).jsonPrimitive.isString)
+            track.getValue(key).jsonPrimitive.boolean
+        }
+    }
+
+    private fun installAudioHudProbe(handle: Long) {
+        NativePlayerBridge.runJavaScript(handle, """
+            const originalAudioPlayerUpdate = window.playerUpdate;
+            window.playerUpdate = update => {
+                originalAudioPlayerUpdate(update);
+                const tracks = update.audioTracks;
+                const valid = Array.isArray(tracks) && tracks.every((track, index) =>
+                    Object.keys(track).sort().join(',') === 'forced,id,index,label,language,selected' &&
+                    track.index === index && typeof track.id === 'string' && /^\d+${'$'}/.test(track.id) &&
+                    typeof track.label === 'string' && typeof track.language === 'string' &&
+                    typeof track.selected === 'boolean' && typeof track.forced === 'boolean');
+                window.webkit.messageHandlers.player.postMessage({type:'audioParityState',
+                    value:valid ? tracks.length * 10 + tracks.findIndex(track => track.selected) : -999});
+            };
+        """.trimIndent())
+    }
+
+    private fun awaitAudioHudState(states: LinkedBlockingQueue<Int>, expected: Int) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (true) {
+            val state = states.poll((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+            assertTrue(state != null, "No playerUpdate audio state $expected")
+            assertTrue(state != -999, "Invalid audio schema in playerUpdate")
+            if (state == expected) return
         }
     }
 

@@ -184,6 +184,7 @@ template<class F> auto guarded(JNIEnv *env, F action) -> decltype(action()) {
 }
 
 struct Player;
+std::string audioTracksJson(Player &player);
 std::string subtitleTracksJson(Player &player);
 
 // Xlib's error handler belongs to the process, not to an mpv handle. Reserve
@@ -319,6 +320,7 @@ struct Player {
         json << "{\"duration\":" << number("duration") << ",\"position\":" << position
              << ",\"buffered\":" << buffered << ",\"paused\":" << (paused ? "true" : "false")
              << ",\"loading\":" << (loading ? "true" : "false")
+             << ",\"audioTracks\":" << audioTracksJson(*this)
              << ",\"subtitleTracks\":" << subtitleTracksJson(*this) << "}";
         return json.str();
     }
@@ -458,6 +460,60 @@ void removeExternalSubtitleTracks(Player &player) {
         const char *command[] = {"sub-remove", id.c_str(), nullptr};
         checkMpv(mpv_command(player.mpv, command), "sub-remove");
     }
+}
+
+std::string audioChannelLayoutName(const std::string &channels, int64_t count) {
+    std::string normalized = trimmed(channels);
+    std::string lower = caseFolded(normalized);
+    if (!normalized.empty() && lower != "unknown") {
+        if (lower == "mono") return "Mono";
+        if (lower == "stereo") return "Stereo";
+        return normalized;
+    }
+    switch (count) {
+        case 1: return "Mono";
+        case 2: return "Stereo";
+        case 6: return "5.1";
+        case 8: return "7.1";
+        default: return count > 0 ? std::to_string(count) + "ch" : "";
+    }
+}
+
+std::string audioTracksJson(Player &player) {
+    const int64_t count = player.integer("track-list/count");
+    int64_t logicalIndex = 0;
+    std::string json = "[";
+    for (int64_t index = 0; index < count; ++index) {
+        std::string prefix = "track-list/" + std::to_string(index) + "/";
+        if (player.stringProperty((prefix + "type").c_str()) != "audio") continue;
+        int64_t trackId = player.integer((prefix + "id").c_str(), logicalIndex + 1);
+        std::string title = trimmed(player.stringProperty((prefix + "title").c_str()));
+        std::string language = trimmed(player.stringProperty((prefix + "lang").c_str()));
+        // The existing codec display helper also covers audio codecs.
+        std::string codec = subtitleCodecDisplayName(player.stringProperty((prefix + "codec").c_str()));
+        if (codec.empty()) codec = subtitleCodecDisplayName(player.stringProperty((prefix + "decoder-desc").c_str()));
+        std::string channels = audioChannelLayoutName(player.stringProperty((prefix + "demux-channels").c_str()),
+            player.integer((prefix + "demux-channel-count").c_str()));
+        // Match Windows formatTrackTitle: title, language, then numbered fallback;
+        // append channel layout and codec only when absent from the base label.
+        std::string label = !title.empty() ? title : !language.empty() ? language :
+            "Track " + std::to_string(logicalIndex + 1);
+        std::string details;
+        for (const auto &detail : {channels, codec}) {
+            if (detail.empty() || caseFolded(label).find(caseFolded(detail)) != std::string::npos) continue;
+            if (!details.empty()) details += ", ";
+            details += detail;
+        }
+        if (!details.empty()) label += " (" + details + ")";
+        if (logicalIndex > 0) json += ',';
+        json += "{\"index\":" + std::to_string(logicalIndex) +
+            ",\"id\":" + jsonString(std::to_string(trackId)) +
+            ",\"label\":" + jsonString(label) + ",\"language\":" + jsonString(language) +
+            ",\"selected\":" + (player.flag((prefix + "selected").c_str()) ? "true" : "false") +
+            ",\"forced\":" + (player.flag((prefix + "forced").c_str()) ? "true" : "false") + '}';
+        ++logicalIndex;
+    }
+    return json + ']';
 }
 
 std::string subtitleTracksJson(Player &player) {
@@ -678,6 +734,30 @@ JNI_METHOD(void, setResizeMode)(JNIEnv *env, jobject, jlong handle, jint mode) {
     withPlayer(env, handle, [&](Player &p) {
         p.property("keepaspect", mode == 1 ? "no" : "yes");
         p.property("panscan", mode == 2 ? "1" : "0");
+    });
+}
+
+JNI_METHOD(jstring, audioTracksJson)(JNIEnv *env, jobject, jlong handle) {
+    if (handle == 0) return env->NewStringUTF("[]");
+    return withPlayer(env, handle, [&](Player &p) {
+        std::string json = audioTracksJson(p);
+        return env->NewStringUTF(json.c_str());
+    });
+}
+JNI_METHOD(jboolean, selectAudioTrack)(JNIEnv *env, jobject, jlong handle, jint trackId) {
+    if (handle == 0) return JNI_FALSE;
+    return withPlayer(env, handle, [&](Player &p) -> jboolean {
+        // A stale/nonexistent aid can disable audio. Resolve only live audio IDs
+        // under the same operation lock used for the actual selection.
+        const int64_t count = p.integer("track-list/count");
+        for (int64_t index = 0; index < count; ++index) {
+            std::string prefix = "track-list/" + std::to_string(index) + "/";
+            if (p.stringProperty((prefix + "type").c_str()) != "audio" ||
+                p.integer((prefix + "id").c_str(), -1) != trackId || trackId < 0) continue;
+            int64_t id = trackId;
+            return mpv_set_property(p.mpv, "aid", MPV_FORMAT_INT64, &id) >= 0;
+        }
+        return JNI_FALSE;
     });
 }
 
