@@ -425,6 +425,17 @@ void LinuxControlsOverlay::setCursorHidden(bool hidden) {
     });
 }
 
+void LinuxControlsOverlay::deliverSeekThumbnail(int64_t positionMs, const std::string &dataUrl,
+    std::shared_ptr<std::atomic<uint64_t>> generation, uint64_t request) {
+    GtkThread::get().post([self = state_, positionMs, dataUrl, generation = std::move(generation), request] {
+        // Recheck at GTK delivery, not only after decoding: a newer request or
+        // shutdown may have overtaken this task in the main-context queue.
+        if (self->closing || !self->ready || generation->load() != request) return;
+        self->evaluate("window.nuvioSeekThumbnailReady && window.nuvioSeekThumbnailReady(" +
+            std::to_string(positionMs) + "," + jsString(dataUrl) + ")");
+    });
+}
+
 void LinuxControlsOverlay::close() {
     if (!state_) return;
     state_->closing = true; // Suppress messages/queued tasks before synchronous GTK teardown.

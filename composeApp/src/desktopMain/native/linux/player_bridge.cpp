@@ -3,6 +3,7 @@
 #include <glib.h>
 #include "controls_overlay.h"
 #include "awt_x11_lifecycle.h"
+#include "seek_thumbnails.h"
 
 #include <algorithm>
 #include <atomic>
@@ -199,6 +200,7 @@ struct Player {
     std::mutex operations;
     std::mutex callbacks;
     std::unique_ptr<LinuxControlsOverlay> controls;
+    std::unique_ptr<LinuxSeekThumbnails> thumbnails;
     std::thread events;
     std::atomic<bool> stopping{false};
     std::atomic<bool> fileReady{false};
@@ -226,6 +228,8 @@ struct Player {
         // GTK callbacks can query mpv; do not hold operations while waiting for GTK.
         // Disconnect/destroy the native child before releasing mpv or the JNI sink.
         if (closingControls) closingControls->close();
+        // No operations/JAWT/GTK lock while waiting for the windowless decoder.
+        if (thumbnails) thumbnails->close();
         // Never hold the operation lock across callbacks/join.
         if (events.joinable()) events.join();
         std::lock_guard<std::mutex> lock(operations);
@@ -642,6 +646,17 @@ JNI_METHOD(jlong, create)(
                 if (auto current = weak.lock()) return current->controlsSnapshot();
                 return std::string{};
             });
+        if (player->controls) {
+            player->thumbnails = std::make_unique<LinuxSeekThumbnails>(source, std::move(headers),
+                [weak](int64_t position, const std::string &url,
+                       LinuxSeekThumbnails::Generation generation, uint64_t request) {
+                    if (auto current = weak.lock()) {
+                        std::lock_guard<std::mutex> lock(current->operations);
+                        if (!current->stopping && current->controls)
+                            current->controls->deliverSeekThumbnail(position, url, std::move(generation), request);
+                    }
+                });
+        }
         jlong handle = nextHandle++;
         std::lock_guard<std::mutex> lock(playersLock);
         players.emplace(handle, player);
@@ -674,6 +689,19 @@ JNI_METHOD(void, seekTo)(JNIEnv *env, jobject, jlong handle, jlong position) {
 }
 JNI_METHOD(void, seekBy)(JNIEnv *env, jobject, jlong handle, jlong offset) {
     withPlayer(env, handle, [&](Player &p) { seek(p, offset, "relative+exact"); });
+}
+JNI_METHOD(void, requestSeekThumbnail)(JNIEnv *env, jobject, jlong handle, jlong positionMs) {
+    guarded(env, [&] {
+        std::shared_ptr<Player> player;
+        {
+            std::lock_guard<std::mutex> lock(playersLock);
+            auto found = players.find(handle);
+            if (found == players.end()) return; // Upstream ignores requests after disposal.
+            player = found->second;
+        }
+        std::lock_guard<std::mutex> lock(player->operations);
+        if (!player->stopping && player->thumbnails) player->thumbnails->request(positionMs);
+    });
 }
 JNI_METHOD(void, setMpvProperty)(JNIEnv *env, jobject, jlong handle, jstring name, jstring value) {
     withPlayer(env, handle, [&](Player &p) { p.property(text(env, name).c_str(), text(env, value)); });

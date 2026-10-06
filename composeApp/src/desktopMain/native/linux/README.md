@@ -115,6 +115,27 @@ configuration files are disabled for this spike. The Linux surface bypasses the
 advanced desktop HDR/RTX/anime/SVP profile pass and SVP startup handshake. Windows
 and macOS keep their existing paths.
 
+## Seek previews
+
+Seek previews now follow the Windows contract: the first request starts one
+in-process, windowless libmpv decoder using the player's source and HTTP headers.
+It seeks independently and delivers JPEG data URLs scaled with `scale=256:-2` to
+`window.nuvioSeekThumbnailReady(positionMs, dataUrl)`. Initial playback readiness
+is consumed before seeking. Only one seek is in flight: its SEEK/restart transition
+is retired before seeking to the newest pending request. The callback retains the
+original requested millisecond timestamp, including for keyframe seeks.
+
+Slow loads remain pending beyond eight seconds; failed contexts retry only on a
+later request. Load/seek/screenshot commands use asynchronous replies. Disposal
+invalidates delivery, requests abort/quit, wakes event waiting, and joins the sole
+decoder owner before main-player teardown. mpv 0.41 cannot abort screenshot encoding;
+its temporary file is retained until writer completion or context destruction.
+Initialization, final libmpv destruction and OS file I/O have no universal API time
+bound, so measured local shutdown latency is not an absolute shutdown guarantee.
+Preview failure leaves the existing timestamp-only HUD; real streaming validation
+is still required. The opt-in smoke suite explicitly builds a separate phase-gated
+test executable; those hooks are not compiled into the JNI library.
+
 ## Deliberately absent
 
 `setMediaSessionMetadata` remains an explicit void no-op: Linux media sessions
@@ -124,7 +145,7 @@ supply invented playback state.
 
 Every other unexported `NativePlayerBridge` method remains unsupported and raises
 `UnsatisfiedLinkError` if called: track/chapter enumeration, audio track selection, external
-subtitle management, seek thumbnails, video/SVP profiling, stats
+subtitle management, video/SVP profiling, stats
 scripts, native window chrome/fullscreen/PiP, gamepads, media identity and system
 idle/foreground queries. Track discovery is currently caught by the shared
 controller and provides no track UI. Optional shortcuts for these deferred

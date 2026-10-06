@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -16,6 +17,8 @@ public:
     ~LinuxControlsOverlay();
     void updateControls(const std::string &json);
     void runJavaScript(const std::string &script);
+    void deliverSeekThumbnail(int64_t positionMs, const std::string &dataUrl,
+        std::shared_ptr<std::atomic<uint64_t>> generation, uint64_t request);
     void setCursorHidden(bool hidden);
     void setWindowFocused(bool focused);
     void close();

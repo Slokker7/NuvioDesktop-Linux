@@ -13,6 +13,12 @@ import java.awt.event.WindowEvent
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
+import java.nio.file.Path
+import java.io.ByteArrayInputStream
+import java.util.Base64
+import java.net.InetSocketAddress
+import com.sun.net.httpserver.HttpServer
+import javax.imageio.ImageIO
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -34,6 +40,8 @@ class LinuxNativePlayerBridgeTest {
         NativePlayerBridge.ensureNativeLibraryLoaded()
         assertTrue(NativePlayerBridge.runtimeDllDir()?.resolve("libplayer_bridge.so")?.isFile == true)
         NativePlayerBridge.dispose(0L)
+        NativePlayerBridge.requestSeekThumbnail(0L, 0L)
+        NativePlayerBridge.requestSeekThumbnail(Long.MAX_VALUE, -1L)
         assertEquals("[]", NativePlayerBridge.subtitleTracksJson(0L))
         assertEquals("[]", NativePlayerBridge.audioTracksJson(0L))
         assertFalse(NativePlayerBridge.selectAudioTrack(0L, 1))
@@ -819,6 +827,471 @@ class LinuxNativePlayerBridgeTest {
         }
     }
 
+    @Test
+    fun seekThumbnailsReachHudWithoutSeekingPlaybackAndSurviveReplacementAndPendingDisposal() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-seek-preview-")
+        val first = directory.resolve("first.y4m")
+        val second = directory.resolve("second.y4m")
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val restarts = LinkedBlockingQueue<Unit>()
+        val ready = LinkedBlockingQueue<Int>()
+        val images = LinkedBlockingQueue<Pair<Int, Int>>()
+        val brightness = LinkedBlockingQueue<Int>()
+        val error = AtomicReference<String?>(null)
+        val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+        var frame: Frame? = null
+        var recreated = 0L
+        fun probe(handle: Long, epoch: Int) {
+            NativePlayerBridge.runJavaScript(handle, """
+                const originalPreviewReady = window.nuvioSeekThumbnailReady;
+                window.nuvioSeekThumbnailReady = (position, url) => {
+                    originalPreviewReady(position, url);
+                    const image = new Image();
+                    image.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = canvas.height = 1;
+                        const context = canvas.getContext('2d');
+                        context.drawImage(image, 0, 0, 1, 1);
+                        window.webkit.messageHandlers.player.postMessage({type:'thumbnailBrightness',
+                            value:context.getImageData(0, 0, 1, 1).data[0]});
+                        window.webkit.messageHandlers.player.postMessage({type:'thumbnailImage$epoch', value:
+                            url.startsWith('data:image/jpeg;base64,/9j/') &&
+                            image.naturalWidth === 256 && image.naturalHeight === 256 ? position : -999999
+                        });
+                    };
+                    image.onerror = () => window.webkit.messageHandlers.player.postMessage({
+                        type:'thumbnailImage$epoch', value:-999999
+                    });
+                    image.src = url;
+                };
+                window.webkit.messageHandlers.player.postMessage({type:'thumbnailProbeReady',value:$epoch});
+            """.trimIndent())
+            assertEquals(epoch, ready.poll(15, TimeUnit.SECONDS), "Preview probe did not reach ready HUD")
+        }
+        fun awaitImage(epoch: Int, position: Int): Int {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+            while (true) {
+                val result = images.poll((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+                assertTrue(result != null, "No JPEG preview at $position in source generation $epoch")
+                assertEquals(epoch, result.first, "Old-source preview reached the new HUD")
+                assertTrue(result.second != -999999, "Invalid JPEG data URL or preview dimensions")
+                val pixel = brightness.poll(5, TimeUnit.SECONDS)
+                assertTrue(pixel != null, "No decoded preview pixels")
+                if (result.second == position) return pixel
+            }
+        }
+        try {
+            writeLocalVideo(first, firstLuma = 32, lumaStep = 5)
+            writeLocalVideo(second, firstLuma = 200)
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                controller.setControlCallbacks({ false }, { type, value ->
+                    when {
+                        type == "playbackRestart" -> restarts.add(Unit)
+                        type == "thumbnailProbeReady" -> ready.add(value.toInt())
+                        type == "thumbnailBrightness" -> brightness.add(value.toInt())
+                        type.startsWith("thumbnailImage") ->
+                            images.add(type.removePrefix("thumbnailImage").toInt() to value.toInt())
+                    }
+                    false
+                }, { false }, { false })
+                attachLocalVideo(controller, first, error)
+            }
+            assertTrue(restarts.poll(20, TimeUnit.SECONDS) != null, "No playback restart: ${error.get()}")
+            await { handleField.getLong(controller) != 0L }
+            val original = handleField.getLong(controller)
+            probe(original, 1)
+            val initialPosition = NativePlayerBridge.positionMs(original)
+            for (position in listOf(0, 1500, 2900)) {
+                // Exercise HUD -> native sink -> shared Kotlin controller -> JNI as well
+                // as the returning native -> WebKit callback; no network or ffmpeg fixture.
+                NativePlayerBridge.runJavaScript(original, """
+                    window.webkit.messageHandlers.player.postMessage({type:'seekThumbnail',value:$position});
+                """.trimIndent())
+                val pixel = awaitImage(1, position)
+                val expectedPixel = ((32 + (position / 100) * 5 - 16) * 255 / 219).coerceIn(0, 255)
+                assertTrue(kotlin.math.abs(pixel - expectedPixel) < 12,
+                    "Wrong frame at $position: decoded brightness $pixel, expected $expectedPixel")
+                assertTrue(kotlin.math.abs(NativePlayerBridge.positionMs(original) - initialPosition) < 150,
+                    "Preview moved the paused main playhead")
+                assertTrue(NativePlayerBridge.isPaused(original))
+            }
+            // At EOF a keyframe seek may have no frame (same timestamp-only fallback as Windows).
+            // An out-of-range request must remain safe and not prevent a subsequent valid request.
+            for (boundary in listOf(3000, -100)) {
+                NativePlayerBridge.requestSeekThumbnail(original, boundary.toLong())
+                val optional = images.poll(4, TimeUnit.SECONDS)
+                if (optional != null) {
+                    assertEquals(1 to boundary, optional, "Invalid boundary preview response")
+                    assertTrue(brightness.poll(5, TimeUnit.SECONDS) != null)
+                }
+                assertTrue(NativePlayerBridge.isPaused(original))
+                assertTrue(kotlin.math.abs(NativePlayerBridge.positionMs(original) - initialPosition) < 150)
+            }
+            SwingUtilities.invokeAndWait {
+                repeat(100) { NativePlayerBridge.requestSeekThumbnail(original, (it * 27).toLong()) }
+                NativePlayerBridge.requestSeekThumbnail(original, 2200)
+            }
+            val rapidPixel = awaitImage(1, 2200)
+            val rapidExpected = (32 + 22 * 5 - 16) * 255 / 219
+            assertTrue(kotlin.math.abs(rapidPixel - rapidExpected) < 12,
+                "Newest timestamp carried wrong pixels: $rapidPixel, expected $rapidExpected")
+            assertEquals(null, images.poll(500, TimeUnit.MILLISECONDS), "Older result overwrote latest preview")
+            assertTrue(kotlin.math.abs(NativePlayerBridge.positionMs(original) - initialPosition) < 150)
+            // Check the main player also keeps advancing normally during a preview.
+            NativePlayerBridge.setPaused(original, false)
+            val playingStart = NativePlayerBridge.positionMs(original)
+            val startedAt = System.nanoTime()
+            NativePlayerBridge.requestSeekThumbnail(original, 2600)
+            awaitImage(1, 2600)
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+            assertTrue(NativePlayerBridge.positionMs(original) <= playingStart + elapsedMs + 300,
+                "Preview seek disturbed advancing main playback")
+            await { NativePlayerBridge.positionMs(original) > playingStart + 50 }
+            assertFalse(NativePlayerBridge.isPaused(original))
+            NativePlayerBridge.setPaused(original, true)
+            // Replace with a request still queued/in flight. New player owns a new worker,
+            // WebView, generation and source; the old handle becomes a safe no-op.
+            SwingUtilities.invokeAndWait {
+                NativePlayerBridge.requestSeekThumbnail(original, 1700)
+                attachLocalVideo(controller, second, error)
+            }
+            await { handleField.getLong(controller).let { it != 0L && it != original } }
+            val replacement = handleField.getLong(controller)
+            images.clear()
+            brightness.clear()
+            NativePlayerBridge.requestSeekThumbnail(original, 100)
+            probe(replacement, 2)
+            NativePlayerBridge.requestSeekThumbnail(replacement, 1000)
+            assertTrue(awaitImage(2, 1000) > 200, "Replacement preview used old-source pixels")
+            SwingUtilities.invokeAndWait {
+                NativePlayerBridge.requestSeekThumbnail(replacement, 2000)
+                controller.dispose() // Pending decoder must join before main X11 teardown.
+            }
+            NativePlayerBridge.requestSeekThumbnail(replacement, 100)
+            NativePlayerBridge.dispose(replacement)
+            images.clear()
+            brightness.clear()
+            var drawable = 0L
+            SwingUtilities.invokeAndWait { drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host) }
+            recreated = create(drawable, first.toString(), NativePlayerEventSink { type, value ->
+                if (type == "thumbnailProbeReady") ready.add(value.toInt())
+                if (type == "thumbnailBrightness") brightness.add(value.toInt())
+                if (type.startsWith("thumbnailImage"))
+                    images.add(type.removePrefix("thumbnailImage").toInt() to value.toInt())
+            }, NativePlayerBridge.controlsPageUrl)
+            probe(recreated, 3)
+            NativePlayerBridge.requestSeekThumbnail(recreated, 1500)
+            assertTrue(awaitImage(3, 1500) in 95..118, "Recreated player used stale source/frame pixels")
+            NativePlayerBridge.requestSeekThumbnail(recreated, 2400)
+            NativePlayerBridge.dispose(recreated)
+            NativePlayerBridge.requestSeekThumbnail(recreated, 0)
+            NativePlayerBridge.dispose(recreated)
+            recreated = 0L
+        } finally {
+            if (recreated != 0L) NativePlayerBridge.dispose(recreated)
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            Files.deleteIfExists(first)
+            Files.deleteIfExists(second)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    // The standalone target compiles the same worker with phase gates; the JNI
+    // library has no hooks. Every returned image, including intermediate rapid
+    // results, is decoded and checked instead of trusting its timestamp label.
+    private class ThumbnailProbe(source: String) : AutoCloseable {
+        private val lines = LinkedBlockingQueue<String>()
+        private val failure = AtomicReference<Throwable?>(null)
+        private val process: Process
+        private val reader: Thread
+        private val input: java.io.BufferedWriter
+        var images = 0
+            private set
+
+        init {
+            val build = listOf(Path.of("build/native/linux"), Path.of("composeApp/build/native/linux"))
+                .first { Files.exists(it.resolve("CMakeCache.txt")) }.toAbsolutePath()
+            val compile = ProcessBuilder("cmake", "--build", build.toString(), "--target",
+                "linux_seek_thumbnail_probe").redirectErrorStream(true).start()
+            val output = compile.inputStream.bufferedReader().readText()
+            check(compile.waitFor() == 0) { output }
+            process = ProcessBuilder(build.resolve("linux_seek_thumbnail_probe").toString(), source)
+                .redirectErrorStream(true).start()
+            input = process.outputStream.bufferedWriter()
+            reader = Thread({
+                process.inputStream.bufferedReader().useLines { stream ->
+                    stream.forEach { line ->
+                        try {
+                            if (line.startsWith("IMAGE ")) {
+                                val parts = line.split(' ', limit = 3)
+                                val position = parts[1].toLong()
+                                assertTrue(parts[2].startsWith("data:image/jpeg;base64,/9j/"))
+                                val bytes = Base64.getDecoder().decode(parts[2].substringAfter(','))
+                                val image = ImageIO.read(ByteArrayInputStream(bytes))
+                                assertEquals(256, image.width)
+                                assertEquals(256, image.height)
+                                val pixel = image.getRGB(0, 0) shr 16 and 255
+                                val expected = ((32 + (position / 100) * 5 - 16) * 255 / 219).toInt()
+                                assertTrue(kotlin.math.abs(pixel - expected) < 12,
+                                    "Mislabeled frame at $position: $pixel, expected $expected")
+                                images++
+                                lines.add("IMAGE $position $pixel")
+                            } else lines.add(line)
+                        } catch (error: Throwable) { failure.compareAndSet(null, error) }
+                    }
+                }
+            }, "Linux thumbnail probe reader").apply { start() }
+        }
+
+        fun send(command: String) { input.write(command); input.newLine(); input.flush() }
+        fun await(prefix: String, seconds: Long = 15): String {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds)
+            while (System.nanoTime() < deadline) {
+                failure.get()?.let { throw AssertionError("Preview frame validation failed", it) }
+                val line = lines.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                if (line.startsWith(prefix)) return line
+            }
+            error("No probe result '$prefix'; process alive=${process.isAlive}")
+        }
+        fun open() { send("OPEN"); await("OPENED") }
+        fun image(position: Long) = await("IMAGE $position ")
+        fun gate(phase: String) { send("GATE $phase"); await("GATED $phase") }
+        fun dispose(): Long {
+            send("CLOSE")
+            val micros = await("CLOSED ").substringAfter(' ').toLong()
+            assertTrue(micros < 5_000_000, "Preview disposal exceeded 5 seconds: $micros us")
+            return micros
+        }
+        override fun close() {
+            try {
+                send("QUIT")
+                assertTrue(process.waitFor(5, TimeUnit.SECONDS), "Probe worker failed to shut down")
+                assertEquals(0, process.exitValue())
+            } finally {
+                if (process.isAlive) { process.destroyForcibly(); process.waitFor() }
+                input.close()
+                reader.join(5000)
+                assertFalse(reader.isAlive, "Probe reader leaked")
+            }
+            failure.get()?.let { throw AssertionError("Preview frame validation failed", it) }
+        }
+    }
+
+    private fun withThumbnailProbe(test: (ThumbnailProbe) -> Unit) {
+        if (!enabled()) return
+        val source = Files.createTempFile("nuvio-linux-thumbnail-stress-", ".y4m")
+        try {
+            writeLocalVideo(source, firstLuma = 32, lumaStep = 5)
+            ThumbnailProbe(source.toString()).use(test)
+        } finally { Files.deleteIfExists(source) }
+    }
+
+    @Test
+    fun thumbnailFirstNonzeroFrameSurvivesOneHundredFreshDecoders() = withThumbnailProbe { probe ->
+        var maximum = 0L
+        repeat(100) {
+            probe.open()
+            probe.send("REQUEST 1500")
+            probe.image(1500)
+            maximum = maxOf(maximum, probe.dispose())
+        }
+        println("Thumbnail fresh-decoder stress: iterations=100 wrongFrames=0 maxDisposeUs=$maximum")
+    }
+
+    @Test
+    fun thumbnailRapidRequestsValidateEveryDeliveredFrame() = withThumbnailProbe { probe ->
+        probe.open()
+        probe.send("REQUEST 0")
+        probe.image(0)
+        repeat(20) { batch ->
+            // Force work to begin before superseding it, rather than merely
+            // coalescing an entirely idle burst on the JNI caller thread.
+            probe.gate("seek-entered")
+            probe.send("REQUEST 1000")
+            probe.await("PHASE seek-entered ")
+            repeat(100) { i -> probe.send("REQUEST ${((i * 7 + batch * 11) % 30) * 100}") }
+            probe.send("REQUEST 1500")
+            probe.send("RELEASE")
+            probe.image(1500)
+        }
+        probe.dispose()
+        println("Thumbnail rapid stress: requests=2041 deliveredFinals=20 wrongFrames=0")
+    }
+
+    @Test
+    fun thumbnailSupersededSeekCannotSatisfyNewestRequest() = withThumbnailProbe { probe ->
+        probe.open()
+        repeat(20) {
+            probe.gate("seek-entered")
+            probe.send("REQUEST 1000")
+            probe.await("PHASE seek-entered ")
+            probe.send("REQUEST 500")
+            probe.send("REQUEST 1500")
+            probe.send("RELEASE")
+            probe.image(1500)
+        }
+        probe.dispose()
+    }
+
+    @Test
+    fun thumbnailShutdownAtObservedPhasesJoinsWorker() = withThumbnailProbe { probe ->
+        var maximum = 0L
+        val phases = listOf("initializing", "load-issued", "waiting-file", "seek-issued",
+            "seek-entered", "seek-ready", "capture-issued", "readback", "delivery")
+        for (phase in phases) repeat(10) {
+            probe.open()
+            probe.gate(phase)
+            probe.send("REQUEST 1500")
+            probe.await("PHASE $phase ")
+            maximum = maxOf(maximum, probe.dispose())
+            probe.send("REQUEST 1500") // disposed helper cannot be resurrected
+        }
+        println("Thumbnail phase shutdown: phases=$phases cycles=90 maxDisposeUs=$maximum")
+    }
+
+    @Test
+    fun thumbnailFailedLoadRetriesOnlyWhenRequestedAgain() {
+        if (!enabled()) return
+        val directory = Files.createTempDirectory("nuvio-linux-thumbnail-retry-")
+        val source = directory.resolve("later.y4m")
+        try {
+            ThumbnailProbe(source.toString()).use { probe ->
+                probe.open()
+                probe.send("REQUEST 1500")
+                probe.await("PHASE decoder-closed ")
+                writeLocalVideo(source, firstLuma = 32, lumaStep = 5)
+                probe.send("REQUEST 1500") // same helper/worker; new context after failure
+                probe.image(1500)
+                probe.dispose()
+            }
+            println("Thumbnail failed-load recovery: sameHelperRecovered=true")
+        } finally { Files.deleteIfExists(source); Files.deleteIfExists(directory) }
+    }
+
+    @Test
+    fun thumbnailShutdownInterruptsEnteredHttpLoad() {
+        if (!enabled()) return
+        val source = Files.createTempFile("nuvio-linux-thumbnail-stall-", ".y4m")
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val executor = java.util.concurrent.Executors.newCachedThreadPool()
+        val arrived = AtomicReference(CountDownLatch(1))
+        val release = AtomicReference(CountDownLatch(1))
+        val completed = AtomicReference(CountDownLatch(1))
+        server.executor = executor
+        var maximum = 0L
+        try {
+            writeLocalVideo(source, firstLuma = 32, lumaStep = 5)
+            val bytes = Files.readAllBytes(source)
+            server.createContext("/fixture.y4m") { exchange ->
+                val done = completed.get()
+                try {
+                    arrived.get().countDown()
+                    release.get().await(20, TimeUnit.SECONDS) // no headers until cancellation measured
+                    exchange.sendResponseHeaders(200, bytes.size.toLong())
+                    exchange.responseBody.use { it.write(bytes) }
+                } catch (_: java.io.IOException) {
+                    // Expected when the cancelled libmpv connection has gone away.
+                } finally { exchange.close(); done.countDown() }
+            }
+            server.start()
+            ThumbnailProbe("http://127.0.0.1:${server.address.port}/fixture.y4m").use { probe ->
+                repeat(10) {
+                    arrived.set(CountDownLatch(1))
+                    release.set(CountDownLatch(1))
+                    completed.set(CountDownLatch(1))
+                    probe.open()
+                    probe.send("REQUEST 1500")
+                    assertTrue(arrived.get().await(5, TimeUnit.SECONDS), "HTTP load did not enter")
+                    maximum = maxOf(maximum, probe.dispose())
+                    release.get().countDown()
+                    assertTrue(completed.get().await(5, TimeUnit.SECONDS))
+                }
+            }
+            println("Thumbnail HTTP shutdown: enteredLoads=10 maxDisposeUs=$maximum")
+        } finally {
+            release.get().countDown()
+            server.stop(0)
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "HTTP fixture executor leaked")
+            Files.deleteIfExists(source)
+        }
+    }
+
+    @Test
+    fun slowThumbnailLoadRecoversOnTheSameNativePlayer() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val source = Files.createTempFile("nuvio-linux-thumbnail-http-", ".y4m")
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val stalled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val arrived = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val ready = LinkedBlockingQueue<Unit>()
+        val images = LinkedBlockingQueue<Int>()
+        var handle = 0L
+        var frame: Frame? = null
+        try {
+            writeLocalVideo(source, firstLuma = 32, lumaStep = 5)
+            val bytes = Files.readAllBytes(source)
+            server.createContext("/fixture.y4m") { exchange ->
+                try {
+                    if (stalled.get()) { arrived.countDown(); release.await(20, TimeUnit.SECONDS) }
+                    val start = exchange.requestHeaders.getFirst("Range")?.substringAfter("bytes=")
+                        ?.substringBefore('-')?.toIntOrNull() ?: 0
+                    exchange.responseHeaders.add("Accept-Ranges", "bytes")
+                    exchange.responseHeaders.add("Content-Range", "bytes $start-${bytes.lastIndex}/${bytes.size}")
+                    exchange.sendResponseHeaders(206, (bytes.size - start).toLong())
+                    exchange.responseBody.use { it.write(bytes, start, bytes.size - start) }
+                } finally { exchange.close() }
+            }
+            server.start()
+            val host = NativePlayerHost()
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            handle = create(drawable, "http://127.0.0.1:${server.address.port}/fixture.y4m",
+                NativePlayerEventSink { type, value ->
+                    if (type == "thumbnailHttpReady") ready.add(Unit)
+                    if (type == "thumbnailHttpPixel") images.add(value.toInt())
+                }, NativePlayerBridge.controlsPageUrl)
+            NativePlayerBridge.runJavaScript(handle, """
+                window.nuvioSeekThumbnailReady = (position, url) => {
+                    const image = new Image();
+                    image.onload = () => {
+                        const c = document.createElement('canvas'); c.width = c.height = 1;
+                        const ctx = c.getContext('2d'); ctx.drawImage(image, 0, 0, 1, 1);
+                        window.webkit.messageHandlers.player.postMessage({type:'thumbnailHttpPixel',
+                            value: position === 1500 ? ctx.getImageData(0,0,1,1).data[0] : -999});
+                    }; image.src = url;
+                };
+                window.webkit.messageHandlers.player.postMessage({type:'thumbnailHttpReady',value:0});
+            """.trimIndent())
+            assertTrue(ready.poll(15, TimeUnit.SECONDS) != null)
+            await { NativePlayerBridge.durationMs(handle) > 0 }
+            stalled.set(true)
+            NativePlayerBridge.requestSeekThumbnail(handle, 0)
+            assertTrue(arrived.await(5, TimeUnit.SECONDS), "Preview never opened the local HTTP source")
+            assertEquals(null, images.poll(9, TimeUnit.SECONDS), "Fixture was not stalled past eight seconds")
+            assertTrue(NativePlayerBridge.isPaused(handle))
+            NativePlayerBridge.requestSeekThumbnail(handle, 1500)
+            release.countDown()
+            val pixel = images.poll(15, TimeUnit.SECONDS)
+            assertTrue(pixel != null && pixel in 95..118, "Slow preview failed to recover: $pixel")
+            assertTrue(NativePlayerBridge.isPaused(handle))
+            println("Thumbnail slow load: stalled=9s samePlayerRecovered=true")
+        } finally {
+            release.countDown()
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            server.stop(0)
+            Files.deleteIfExists(source)
+        }
+    }
+
     private fun videoFrame(host: NativePlayerHost) = Frame("Nuvio Linux video lifecycle test").apply {
         isAutoRequestFocus = false
         focusableWindowState = false
@@ -838,11 +1311,12 @@ class LinuxNativePlayerBridgeTest {
         onError = { error.set(it ?: "Native attach failed") },
     )
 
-    private fun writeLocalVideo(source: java.nio.file.Path) {
+    private fun writeLocalVideo(source: java.nio.file.Path, firstLuma: Int = 128, lumaStep: Int = 0) {
         Files.newOutputStream(source).use { output ->
             output.write("YUV4MPEG2 W64 H64 F10:1 Ip A1:1 C420jpeg\n".toByteArray())
             val pixels = ByteArray(64 * 64 * 3 / 2) { 128.toByte() }
-            repeat(30) {
+            repeat(30) { frame ->
+                pixels.fill((firstLuma + frame * lumaStep).toByte(), 0, 64 * 64)
                 output.write("FRAME\n".toByteArray())
                 output.write(pixels)
             }

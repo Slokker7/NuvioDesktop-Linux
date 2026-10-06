@@ -32,7 +32,7 @@ if(NOT EXISTS "${MPV_INCLUDE_DIR}/mpv/client.h" OR
     message(FATAL_ERROR "libmpv headers/library not found; set MPV_ROOT to the mpv installation prefix")
 endif()
 
-add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp)
+add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp seek_thumbnails.cpp)
 target_compile_features(player_bridge PRIVATE cxx_std_17)
 target_include_directories(player_bridge PRIVATE "${MPV_INCLUDE_DIR}")
 target_include_directories(player_bridge SYSTEM PRIVATE
@@ -51,3 +51,12 @@ set_target_properties(player_bridge PROPERTIES
     # Local development only: resolve libmpv without requiring LD_LIBRARY_PATH.
     BUILD_RPATH "$ORIGIN;${MPV_LIBRARY_DIR}"
 )
+
+# Built explicitly by the opt-in smoke suite; no test hooks in player_bridge.
+add_executable(linux_seek_thumbnail_probe EXCLUDE_FROM_ALL
+    tests/seek_thumbnail_probe.cpp seek_thumbnails.cpp)
+target_compile_features(linux_seek_thumbnail_probe PRIVATE cxx_std_17)
+target_compile_definitions(linux_seek_thumbnail_probe PRIVATE NUVIO_SEEK_THUMBNAIL_TESTING)
+target_include_directories(linux_seek_thumbnail_probe PRIVATE "${MPV_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(linux_seek_thumbnail_probe PRIVATE Threads::Threads "${MPV_LIBRARY}" PkgConfig::GTK3)
+set_target_properties(linux_seek_thumbnail_probe PROPERTIES BUILD_RPATH "${MPV_LIBRARY_DIR}")
