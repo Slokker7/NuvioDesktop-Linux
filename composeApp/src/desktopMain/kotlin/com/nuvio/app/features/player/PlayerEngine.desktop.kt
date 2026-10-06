@@ -83,7 +83,9 @@ actual fun PlatformPlayerSurface(
     onSnapshot: (PlayerPlaybackSnapshot) -> Unit,
     onError: (String?) -> Unit,
 ) {
-    if (DesktopHostOs.current == DesktopHostOs.MACOS || DesktopHostOs.current == DesktopHostOs.WINDOWS) {
+    if (DesktopHostOs.current == DesktopHostOs.MACOS || DesktopHostOs.current == DesktopHostOs.WINDOWS ||
+        DesktopHostOs.current == DesktopHostOs.LINUX
+    ) {
         NativePlayerSurface(
             sourceUrl = sourceUrl,
             sourceAudioUrl = sourceAudioUrl,
@@ -179,7 +181,8 @@ private fun NativePlayerSurface(
             ?: DESKTOP_PLAYBACK_FALLBACK_USER_AGENT
     }
     val playerSettings by PlayerSettingsRepository.uiState.collectAsState()
-    val initialAnimeSvpRequested = playerSettings.desktopAnimeSvpEnabled &&
+    val initialAnimeSvpRequested = DesktopHostOs.current != DesktopHostOs.LINUX &&
+        playerSettings.desktopAnimeSvpEnabled &&
         playerSettings.desktopMpvConfigMode != DesktopMpvConfigMode.Full &&
         isAnimeContent &&
         initialPlaybackSpeed < 1.5f
@@ -860,6 +863,9 @@ private fun NativePlayerSurface(
     }
 
     LaunchedEffect(controller, playbackAttemptId, sourceUrl, isAnimeContent) {
+        // The Linux embedding spike uses libmpv's baseline picture. Advanced desktop profiles
+        // include Windows decoder/filter assumptions and are outside this milestone.
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) return@LaunchedEffect
         // Apply the saved colour/HDR presets whenever they change or the file's HDR
         // state is (re)detected. Deliberately NOT gated on HDR detection: the colour
         // profile (and F8/F9 changes) must take effect even if the video-params event
@@ -1058,7 +1064,7 @@ private fun NativePlayerSurface(
                 factory = {
                     host
                 },
-                modifier = if (hostFirstPaintComplete.value) {
+                modifier = if (DesktopHostOs.current == DesktopHostOs.LINUX || hostFirstPaintComplete.value) {
                     Modifier.fillMaxSize()
                 } else {
                     Modifier

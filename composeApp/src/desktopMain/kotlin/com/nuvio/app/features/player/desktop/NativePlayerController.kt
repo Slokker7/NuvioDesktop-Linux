@@ -306,7 +306,14 @@ internal class NativePlayerController(
             if (disposed || !host.isDisplayable) {
                 return@invokeLater
             }
-            val hostViewPtr = AwtNativeViewResolver.resolveNativeViewPointer(host)
+            val hostViewPtr = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+                runCatching { AwtNativeViewResolver.resolveNativeViewPointer(host) }.getOrElse { error ->
+                    pending.onError(error.message)
+                    return@invokeLater
+                }
+            } else {
+                AwtNativeViewResolver.resolveNativeViewPointer(host)
+            }
             val previousHandle = takePlayerHandle()
             keyboardPanelOpen = false
             lastSentControlsStructureKey = null
