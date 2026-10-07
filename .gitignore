@@ -28,6 +28,25 @@ scripts/build-distribution.sh
 asset
 scripts/scrape_android_compose_animation_docs.py
 tools
+!/tools/
+/tools/*
+!/tools/linux/
+/tools/linux/*
+!/tools/linux/media-runtime/
+/tools/linux/media-runtime/*
+!/tools/linux/media-runtime/Containerfile
+!/tools/linux/media-runtime/README.md
+!/tools/linux/media-runtime/build.sh
+!/tools/linux/media-runtime/manifest.json
+!/tools/linux/media-runtime/scripts/
+/tools/linux/media-runtime/scripts/*
+!/tools/linux/media-runtime/scripts/*.py
+!/tools/linux/media-runtime/scripts/*.sh
+!/tools/linux/media-runtime/tests/
+/tools/linux/media-runtime/tests/*
+!/tools/linux/media-runtime/tests/*.py
+!/tools/linux/media-runtime/tests/*.lua
+!/tools/linux/media-runtime/tests/vectors.json
 /app/
 
 # TorrServer P2P binary (bundled at build/package time, not committed)

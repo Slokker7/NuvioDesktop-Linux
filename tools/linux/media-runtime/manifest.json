@@ -1,0 +1,658 @@
+{
+  "schema_version": 1,
+  "architecture": "x86_64",
+  "source_date_epoch": 1790812800,
+  "baseline": {
+    "max_glibc": "2.35",
+    "max_glibcxx": "3.4.30",
+    "description": "Ubuntu 22.04 native media ABI; whole-app compatibility requires separate validation."
+  },
+  "builder": {
+    "base_image": "docker.io/library/ubuntu@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde",
+    "apt_snapshot": "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z",
+    "packages": [
+      "build-essential",
+      "gcc-12",
+      "g++-12",
+      "binutils",
+      "cmake",
+      "ninja-build",
+      "pkg-config",
+      "python3",
+      "python3-jinja2",
+      "jq",
+      "curl",
+      "gnupg",
+      "autoconf",
+      "automake",
+      "libtool",
+      "patchelf",
+      "libva-dev",
+      "libdrm-dev",
+      "libudev-dev",
+      "hwdata",
+      "libx11-dev",
+      "libxext-dev",
+      "libxpresent-dev",
+      "libxrandr-dev",
+      "libxss-dev",
+      "libxcb1-dev",
+      "libxcb-dri3-dev",
+      "libwayland-dev",
+      "libasound2-dev",
+      "libpulse-dev",
+      "libfontconfig1-dev",
+      "libfreetype6-dev",
+      "libfribidi-dev",
+      "libharfbuzz-dev",
+      "libssl-dev",
+      "zlib1g-dev",
+      "liblcms2-dev",
+      "libbz2-dev"
+    ],
+    "cc": "gcc-12",
+    "cxx": "g++-12",
+    "classification": "builder-provided"
+  },
+  "sources": [
+    {
+      "name": "meson",
+      "version": "1.9.1",
+      "url": "https://github.com/mesonbuild/meson/archive/refs/tags/1.9.1.tar.gz",
+      "sha256": "febaa8f7c1916521c53eb5fd11c0641b5eb4741c2c6e9b42c288ed62d9e4fd2c",
+      "classification": "build-only",
+      "license": "Apache-2.0",
+      "license_files": [
+        "COPYING"
+      ],
+      "reason": "Pinned Meson for mpv, libplacebo and dav1d.",
+      "options": [],
+      "patches": []
+    },
+    {
+      "name": "nasm",
+      "version": "2.16.03",
+      "url": "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.xz",
+      "sha256": "1412a1c760bbd05db026b6c0d1657affd6631cd0a63cddb6f73cc6d4aa616148",
+      "classification": "build-only",
+      "license": "BSD-2-Clause",
+      "license_files": [
+        "LICENSE"
+      ],
+      "reason": "x86_64 SIMD assembly, including dav1d software fallback.",
+      "options": [],
+      "patches": []
+    },
+    {
+      "name": "nv-codec-headers",
+      "version": "12.1.14.0",
+      "url": "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n12.1.14.0.tar.gz",
+      "sha256": "2fefaa227d2a3b4170797796425a59d1dd2ed5fd231db9b4244468ba327acd0b",
+      "classification": "build-only",
+      "license": "MIT",
+      "license_files": [
+        "include/ffnvcodec/dynlink_cuda.h",
+        "include/ffnvcodec/dynlink_nvcuvid.h",
+        "include/ffnvcodec/dynlink_loader.h",
+        "include/ffnvcodec/nvEncodeAPI.h"
+      ],
+      "reason": "Optional NVIDIA decoding interfaces; Linux driver floor 530.41.03.",
+      "options": [],
+      "patches": [],
+      "incorporated_code": true
+    },
+    {
+      "name": "Vulkan-Headers",
+      "version": "1.4.363.0",
+      "url": "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz",
+      "sha256": "4a078be12bef21cfebc09d878b77a63cff9d68f899254a0b00d0e37ef73e7f7e",
+      "classification": "build-only",
+      "license": "Apache-2.0 AND MIT",
+      "license_files": [
+        "LICENSES/*"
+      ],
+      "reason": "Matching Vulkan registry and compile interfaces; no vendor driver.",
+      "options": [],
+      "patches": [],
+      "incorporated_code": true
+    },
+    {
+      "name": "Vulkan-Loader",
+      "version": "1.4.363.0",
+      "url": "https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz",
+      "sha256": "941eff558fc74f248745fb7df367640cf89a8457f216dae498a74ae14b6ba6f7",
+      "classification": "private-built",
+      "license": "Apache-2.0 AND MIT",
+      "license_files": [
+        "LICENSE.txt",
+        "loader/cJSON.c"
+      ],
+      "reason": "Generic Vulkan dispatch loader for older native hosts; ICDs remain platform supplied.",
+      "options": [
+        "-DBUILD_TESTS=OFF",
+        "-DBUILD_WSI_XLIB_SUPPORT=ON",
+        "-DBUILD_WSI_XCB_SUPPORT=ON",
+        "-DBUILD_WSI_WAYLAND_SUPPORT=ON",
+        "-DUPDATE_DEPS=OFF"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libvulkan.so*"
+      ],
+      "incorporated_components": [
+        {
+          "name": "cJSON",
+          "license": "MIT",
+          "source": "loader/cJSON.c",
+          "notice": "loader/cJSON.c"
+        }
+      ]
+    },
+    {
+      "name": "glslang",
+      "version": "14.3.0",
+      "url": "https://github.com/KhronosGroup/glslang/archive/refs/tags/14.3.0.tar.gz",
+      "sha256": "be6339048e20280938d9cb399fcdd06e04f8654d43e170e8cce5a56c9a754284",
+      "classification": "private-built",
+      "license": "BSD-3-Clause AND BSD-2-Clause AND MIT AND Apache-2.0",
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "reason": "SPIR-V shader compiler statically incorporated into libplacebo; no encoder/toolkit.",
+      "options": [
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DBUILD_EXTERNAL=OFF",
+        "-DENABLE_OPT=OFF",
+        "-DENABLE_GLSLANG_BINARIES=OFF",
+        "-DGLSLANG_TESTS=OFF",
+        "-DENABLE_CTEST=OFF",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
+      ],
+      "patches": [],
+      "runtime_libraries": []
+    },
+    {
+      "name": "dav1d",
+      "version": "1.5.4",
+      "url": "https://code.videolan.org/videolan/dav1d/-/archive/1.5.4/dav1d-1.5.4.tar.bz2",
+      "sha256": "2abfb0c89212e6e4733a54e0ae509ec00a5b845a6360946f918806e14aedb011",
+      "classification": "private-built",
+      "license": "BSD-2-Clause",
+      "license_files": [
+        "COPYING"
+      ],
+      "reason": "Actual AV1 software fallback, matching the proven runtime version.",
+      "options": [
+        "-Denable_tools=false",
+        "-Denable_tests=false"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libdav1d.so*"
+      ]
+    },
+    {
+      "name": "LuaJIT",
+      "version": "2.1.1788856981-c6ffc141a8762b41703f9287d63d93622a13dd8f",
+      "url": "https://github.com/LuaJIT/LuaJIT/archive/c6ffc141a8762b41703f9287d63d93622a13dd8f.tar.gz",
+      "sha256": "6e5fec07750add912e7c3eae0c194d24cd6d023714e1f04a0298a5b4819e4457",
+      "classification": "private-built",
+      "license": "MIT",
+      "license_files": [
+        "COPYRIGHT"
+      ],
+      "reason": "Immutable proven LuaJIT revision; osc option must exist for the unchanged bridge.",
+      "options": [],
+      "patches": [],
+      "runtime_libraries": [
+        "libluajit-5.1.so*"
+      ],
+      "portable_temp_templates": [
+        {
+          "files": [
+            "libluajit-5.1.so*"
+          ],
+          "directory": "/tmp",
+          "name": "lua_XXXXXX",
+          "reason": "Upstream os.tmpname generic system temporary filename, not build provenance."
+        }
+      ]
+    },
+    {
+      "name": "libunibreak",
+      "version": "8.0",
+      "url": "https://github.com/adah1972/libunibreak/releases/download/libunibreak_8_0/libunibreak-8.0.tar.gz",
+      "sha256": "9c4fad6e517338a098373acc9f35579ae2c325e6446666fb9ac2666ba15ceba4",
+      "classification": "private-built",
+      "license": "Zlib",
+      "license_files": [
+        "LICENCE"
+      ],
+      "reason": "Preserve libass Unicode wrapping without depending on a distro-specific libunibreak SONAME.",
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libunibreak.so*"
+      ]
+    },
+    {
+      "name": "libass",
+      "version": "0.17.5",
+      "url": "https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz",
+      "sha256": "2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc",
+      "classification": "private-built",
+      "license": "ISC",
+      "license_files": [
+        "COPYING"
+      ],
+      "reason": "Matching subtitle renderer; host font platform, private line-breaking library.",
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libass.so*"
+      ]
+    },
+    {
+      "name": "libdisplay-info",
+      "version": "0.3.0",
+      "url": "https://deb.debian.org/debian/pool/main/libd/libdisplay-info/libdisplay-info_0.3.0.orig.tar.bz2",
+      "sha256": "915cc6713b7b2e173a90f9db248fb8994f9668171fecc1e9fded5e36bb34d890",
+      "classification": "private-built",
+      "license": "MIT",
+      "license_files": [
+        "LICENSE"
+      ],
+      "reason": "EDID helper required to compile mpv DRM and VAAPI-DRM paths.",
+      "options": [],
+      "patches": [],
+      "upstream_url": "https://gitlab.freedesktop.org/emersion/libdisplay-info/-/releases/0.3.0",
+      "mirror_note": "Debian original upstream release archive; pinned independently by SHA-256.",
+      "runtime_libraries": [
+        "libdisplay-info.so*"
+      ]
+    },
+    {
+      "name": "libplacebo",
+      "version": "7.360.1",
+      "url": "https://code.videolan.org/videolan/libplacebo/-/archive/v7.360.1/libplacebo-v7.360.1.tar.bz2",
+      "sha256": "937aa5eeea596798b3274d362de2e3bd32bc537a66d149dd85043349c74dffb6",
+      "classification": "private-built",
+      "license": "LGPL-2.1-or-later",
+      "license_files": [
+        "LICENSE",
+        "3rdparty/*/LICENSE*",
+        "3rdparty/*/COPYING*"
+      ],
+      "reason": "Matching gpu-next renderer and hardware-frame interop.",
+      "options": [
+        "-Dauto_features=disabled",
+        "-Ddemos=false",
+        "-Dtests=false",
+        "-Dbench=false",
+        "-Dfuzz=false",
+        "-Dvulkan=enabled",
+        "-Dvk-proc-addr=enabled",
+        "-Dglslang=enabled",
+        "-Dshaderc=disabled",
+        "-Dopengl=disabled",
+        "-Ddovi=enabled",
+        "-Dlcms=enabled",
+        "-Dvulkan-registry=@BUILD_PREFIX@/share/vulkan/registry/vk.xml"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libplacebo.so*"
+      ]
+    },
+    {
+      "name": "bzip2",
+      "version": "1.0.8",
+      "url": "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz",
+      "sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269",
+      "classification": "private-built",
+      "license": "bzip2-1.0.6",
+      "license_files": [
+        "LICENSE"
+      ],
+      "reason": "Private compression library avoids Ubuntu/Fedora bzip2 SONAME incompatibility.",
+      "options": [
+        "-f",
+        "Makefile-libbz2_so"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libbz2.so*"
+      ]
+    },
+    {
+      "name": "FFmpeg",
+      "version": "9.0.2",
+      "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+      "classification": "private-built",
+      "license": "LGPL-3.0-or-later",
+      "license_files": [
+        "COPYING.LGPLv3",
+        "COPYING.LGPLv2.1",
+        "LICENSE.md"
+      ],
+      "reason": "Playback-focused software codecs/demuxers/protocols/filters plus NVDEC, VAAPI and Vulkan Video.",
+      "options": [
+        "--enable-shared",
+        "--disable-static",
+        "--disable-debug",
+        "--disable-doc",
+        "--disable-autodetect",
+        "--enable-version3",
+        "--disable-ffplay",
+        "--disable-avdevice",
+        "--disable-indevs",
+        "--disable-outdevs",
+        "--disable-encoders",
+        "--enable-encoder=wrapped_avframe,pcm_s16le,png,mjpeg",
+        "--disable-muxers",
+        "--enable-muxer=null,image2,spdif",
+        "--enable-libdav1d",
+        "--enable-openssl",
+        "--enable-zlib",
+        "--enable-bzlib",
+        "--enable-iconv",
+        "--enable-ffnvcodec",
+        "--enable-cuda",
+        "--enable-nvdec",
+        "--enable-cuvid",
+        "--disable-nvenc",
+        "--disable-cuda-nvcc",
+        "--disable-cuda-llvm",
+        "--disable-libnpp",
+        "--enable-vaapi",
+        "--enable-libdrm",
+        "--enable-vulkan"
+      ],
+      "patches": [],
+      "signature": {
+        "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc",
+        "sha256": "d617fd94ea354dadd2a8bb16243d37c44e1e9729b06b6ad58fe30bfb0fa943f2",
+        "key_url": "https://ffmpeg.org/ffmpeg-devel.asc",
+        "key_sha256": "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5",
+        "fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8"
+      },
+      "runtime_libraries": [
+        "libav*.so*",
+        "libsw*.so*"
+      ],
+      "portable_temp_templates": [
+        {
+          "files": [
+            "libavutil.so*"
+          ],
+          "directory": "/tmp",
+          "name": "%sXXXXXX",
+          "reason": "Upstream av_tempfile generic system temporary filename, not build provenance."
+        }
+      ]
+    },
+    {
+      "name": "libXpresent",
+      "version": "1.0.2",
+      "url": "https://www.x.org/releases/individual/lib/libXpresent-1.0.2.tar.xz",
+      "sha256": "4e5b21b4812206a4b223013606ae31170502c1043038777a1ef8f70c09d37602",
+      "classification": "private-built",
+      "license": "MIT",
+      "license_files": [
+        "COPYING"
+      ],
+      "reason": "Generic X11 Present extension client required by mpv; absent on some desktops, including the validation host. Core X11 stays platform-provided.",
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libXpresent.so*"
+      ]
+    },
+    {
+      "name": "mpv",
+      "version": "0.41.0",
+      "url": "https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz",
+      "sha256": "ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209",
+      "classification": "private-built",
+      "license": "GPL-2.0-or-later",
+      "license_files": [
+        "Copyright",
+        "LICENSE.GPL",
+        "LICENSE.LGPL"
+      ],
+      "reason": "Existing JNI/API, wid/x11vk, subtitles, audio and software thumbnail contract.",
+      "options": [
+        "-Dauto_features=disabled",
+        "-Dlibmpv=true",
+        "-Dcplayer=true",
+        "-Dgpl=true",
+        "-Dbuild-date=false",
+        "-Dgl=disabled",
+        "-Dlua=luajit",
+        "-Dx11=enabled",
+        "-Dvulkan=enabled",
+        "-Dcuda-hwaccel=enabled",
+        "-Dcuda-interop=enabled",
+        "-Ddrm=enabled",
+        "-Dvaapi=enabled",
+        "-Dvaapi-drm=enabled",
+        "-Dvaapi-x11=enabled",
+        "-Dalsa=enabled",
+        "-Dpulse=enabled",
+        "-Dlcms2=enabled",
+        "-Diconv=enabled",
+        "-Dzlib=enabled"
+      ],
+      "patches": [],
+      "runtime_libraries": [
+        "libmpv.so*"
+      ]
+    },
+    {
+      "name": "ca-certificates",
+      "version": "20260601~22.04.1",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~22.04.1_all.deb",
+      "sha256": "6e8cdcc8c86103acd4fc14649eac62ff2037108389074a7b167567af33c32245",
+      "classification": "build-only",
+      "license": "MPL-2.0",
+      "reason": "Data-only TLS root bootstrap for the digest-pinned minimal Ubuntu image; never bundled.",
+      "license_files": [],
+      "options": [],
+      "patches": []
+    },
+    {
+      "name": "hwdata",
+      "version": "0.357",
+      "url": "https://github.com/vcrhonek/hwdata/archive/refs/tags/v0.357.tar.gz",
+      "sha256": "499999f6fc48cadd0d54706d7a83db6cf571bb3fdf4ebbba78833fa22a1c2170",
+      "classification": "builder-provided",
+      "license": "GPL-2.0-or-later",
+      "license_note": "Upstream also offers XFree86 1.0; this inventory elects the GPL-2.0-or-later branch.",
+      "license_files": [
+        "LICENSE",
+        "COPYING"
+      ],
+      "reason": "Source and notices for PNP ID data compiled into libdisplay-info. Builder snapshot supplies hwdata 0.357-1; data must match this archive exactly.",
+      "options": [],
+      "patches": [],
+      "incorporated_data": [
+        "pnp.ids"
+      ]
+    }
+  ],
+  "host_runtime": {
+    "classification": "host-runtime",
+    "allowed_needed": [
+      "libc.so.6",
+      "libm.so.6",
+      "libpthread.so.0",
+      "libdl.so.2",
+      "librt.so.1",
+      "libstdc++.so.6",
+      "libgcc_s.so.1",
+      "libatomic.so.1",
+      "libva.so.2",
+      "libva-drm.so.2",
+      "libva-x11.so.2",
+      "libdrm.so.2",
+      "libX11.so.6",
+      "libXext.so.6",
+      "libXrandr.so.2",
+      "libXss.so.1",
+      "libxcb.so.1",
+      "libwayland-client.so.0",
+      "libasound.so.2",
+      "libpulse.so.0",
+      "libfontconfig.so.1",
+      "libfreetype.so.6",
+      "libfribidi.so.0",
+      "libharfbuzz.so.0",
+      "libssl.so.3",
+      "libcrypto.so.3",
+      "libz.so.1",
+      "liblcms2.so.2",
+      "libudev.so.1",
+      "ld-linux-x86-64.so.2"
+    ],
+    "policy": "Platform desktop/audio/font/crypto interfaces. GPU vendor drivers and ICDs never bundled. Flatpak rebuilds against SDK interfaces."
+  },
+  "optional_drivers": {
+    "classification": "host-runtime",
+    "sonames": [
+      "libcuda.so.1",
+      "libnvcuvid.so.1"
+    ],
+    "nvidia_min_driver": "530.41.03",
+    "policy": "Dynamically discovered only when decoding is requested; not mandatory DT_NEEDED."
+  },
+  "required_runtime_files": [
+    "include/mpv/client.h",
+    "include/mpv/render.h",
+    "lib/libmpv.so",
+    "bin/mpv",
+    "bin/ffmpeg",
+    "bin/ffprobe"
+  ],
+  "artifact_contract": {
+    "executables": {
+      "bin/mpv": "mpv",
+      "bin/ffmpeg": "FFmpeg",
+      "bin/ffprobe": "FFmpeg"
+    },
+    "libraries": {
+      "lib/libXpresent.so.1.0.0": {
+        "soname": "libXpresent.so.1",
+        "component": "libXpresent"
+      },
+      "lib/libass.so.9.4.2": {
+        "soname": "libass.so.9",
+        "component": "libass"
+      },
+      "lib/libavcodec.so.63.1.102": {
+        "soname": "libavcodec.so.63",
+        "component": "FFmpeg"
+      },
+      "lib/libavfilter.so.12.1.102": {
+        "soname": "libavfilter.so.12",
+        "component": "FFmpeg"
+      },
+      "lib/libavformat.so.63.1.102": {
+        "soname": "libavformat.so.63",
+        "component": "FFmpeg"
+      },
+      "lib/libavutil.so.61.1.102": {
+        "soname": "libavutil.so.61",
+        "component": "FFmpeg"
+      },
+      "lib/libbz2.so.1.0.8": {
+        "soname": "libbz2.so.1.0",
+        "component": "bzip2"
+      },
+      "lib/libdav1d.so.7.0.0": {
+        "soname": "libdav1d.so.7",
+        "component": "dav1d"
+      },
+      "lib/libdisplay-info.so.0.3.0": {
+        "soname": "libdisplay-info.so.3",
+        "component": "libdisplay-info"
+      },
+      "lib/libluajit-5.1.so.2.1.1788856981": {
+        "soname": "libluajit-5.1.so.2",
+        "component": "LuaJIT"
+      },
+      "lib/libmpv.so.2.5.0": {
+        "soname": "libmpv.so.2",
+        "component": "mpv"
+      },
+      "lib/libplacebo.so.360": {
+        "soname": "libplacebo.so.360",
+        "component": "libplacebo"
+      },
+      "lib/libswresample.so.7.1.102": {
+        "soname": "libswresample.so.7",
+        "component": "FFmpeg"
+      },
+      "lib/libswscale.so.10.1.102": {
+        "soname": "libswscale.so.10",
+        "component": "FFmpeg"
+      },
+      "lib/libunibreak.so.8.0.0": {
+        "soname": "libunibreak.so.8",
+        "component": "libunibreak"
+      },
+      "lib/libvulkan.so.1.4.363": {
+        "soname": "libvulkan.so.1",
+        "component": "Vulkan-Loader"
+      }
+    },
+    "symlinks": {
+      "lib/libXpresent.so": "libXpresent.so.1.0.0",
+      "lib/libXpresent.so.1": "libXpresent.so.1.0.0",
+      "lib/libass.so": "libass.so.9.4.2",
+      "lib/libass.so.9": "libass.so.9.4.2",
+      "lib/libavcodec.so": "libavcodec.so.63.1.102",
+      "lib/libavcodec.so.63": "libavcodec.so.63.1.102",
+      "lib/libavfilter.so": "libavfilter.so.12.1.102",
+      "lib/libavfilter.so.12": "libavfilter.so.12.1.102",
+      "lib/libavformat.so": "libavformat.so.63.1.102",
+      "lib/libavformat.so.63": "libavformat.so.63.1.102",
+      "lib/libavutil.so": "libavutil.so.61.1.102",
+      "lib/libavutil.so.61": "libavutil.so.61.1.102",
+      "lib/libbz2.so": "libbz2.so.1.0",
+      "lib/libbz2.so.1.0": "libbz2.so.1.0.8",
+      "lib/libdav1d.so": "libdav1d.so.7",
+      "lib/libdav1d.so.7": "libdav1d.so.7.0.0",
+      "lib/libdisplay-info.so": "libdisplay-info.so.3",
+      "lib/libdisplay-info.so.3": "libdisplay-info.so.0.3.0",
+      "lib/libluajit-5.1.so": "libluajit-5.1.so.2.1.1788856981",
+      "lib/libluajit-5.1.so.2": "libluajit-5.1.so.2.1.1788856981",
+      "lib/libmpv.so": "libmpv.so.2",
+      "lib/libmpv.so.2": "libmpv.so.2.5.0",
+      "lib/libplacebo.so": "libplacebo.so.360",
+      "lib/libswresample.so": "libswresample.so.7.1.102",
+      "lib/libswresample.so.7": "libswresample.so.7.1.102",
+      "lib/libswscale.so": "libswscale.so.10.1.102",
+      "lib/libswscale.so.10": "libswscale.so.10.1.102",
+      "lib/libunibreak.so": "libunibreak.so.8.0.0",
+      "lib/libunibreak.so.8": "libunibreak.so.8.0.0",
+      "lib/libvulkan.so": "libvulkan.so.1",
+      "lib/libvulkan.so.1": "libvulkan.so.1.4.363"
+    },
+    "headers": [
+      "include/mpv/client.h",
+      "include/mpv/render.h",
+      "include/mpv/render_gl.h",
+      "include/mpv/stream_cb.h"
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ENV DEBIAN_FRONTEND=noninteractive
+COPY manifest.json /builder-manifest.json
+COPY ca-certificates.deb /bootstrap-ca.deb
+ARG CA_SHA256
+# The digest-pinned minimal image has no TLS roots. Extract verified CA data only;
+# do not execute the bootstrap package's maintainer scripts.
+RUN printf '%s  /bootstrap-ca.deb\n' "$CA_SHA256" | sha256sum -c - \
+ && dpkg-deb --extract /bootstrap-ca.deb /bootstrap-ca \
+ && mkdir -p /etc/ssl/certs \
+ && find /bootstrap-ca/usr/share/ca-certificates -type f -name '*.crt' -exec cat {} + > /etc/ssl/certs/ca-certificates.crt \
+ && rm -rf /bootstrap-ca /bootstrap-ca.deb
+ARG APT_SNAPSHOT
+# APT verifies Ubuntu-signed indexes and package hashes. Expired snapshot dates
+# are intentional; certificate and repository signature checking remain enabled.
+RUN printf 'deb %s jammy main universe\ndeb %s jammy-updates main universe\ndeb %s jammy-security main universe\n' \
+       "$APT_SNAPSHOT" "$APT_SNAPSHOT" "$APT_SNAPSHOT" > /etc/apt/sources.list \
+ && apt-get -o Acquire::Check-Valid-Until=false -o APT::Update::Error-Mode=any update \
+ && apt-get install -y --no-install-recommends ca-certificates jq \
+ && apt-get install -y --no-install-recommends $(jq -r '.builder.packages[]' /builder-manifest.json) \
+ && dpkg-query -W -f='${Package}\t${Version}\n' | LC_ALL=C sort > /builder-packages.tsv \
+ && rm -rf /var/lib/apt/lists/*
