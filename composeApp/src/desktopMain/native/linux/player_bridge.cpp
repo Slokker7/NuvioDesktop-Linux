@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdio>
 #include <future>
+#include <iomanip>
+#include <limits>
 #include <memory>
 #include <locale>
 #include <mutex>
@@ -408,6 +410,12 @@ std::mutex playersLock;
 std::unordered_map<jlong, std::shared_ptr<Player>> players;
 std::atomic<jlong> nextHandle{1};
 
+std::shared_ptr<Player> playerFromHandle(jlong handle) {
+    std::lock_guard<std::mutex> lock(playersLock);
+    auto found = players.find(handle);
+    return found == players.end() ? nullptr : found->second;
+}
+
 template<class F> auto withPlayer(JNIEnv *env, jlong handle, F action) -> decltype(action(std::declval<Player &>())) {
     return guarded(env, [&]() {
         std::shared_ptr<Player> player;
@@ -449,6 +457,47 @@ void seek(Player &player, jlong ms, const char *mode) {
     const char *command[] = {"seek", seconds.c_str(), mode, nullptr};
     checkMpv(mpv_command(player.mpv, command), "seek");
     player.ended = false;
+}
+
+std::string chaptersJson(Player &player) {
+    // One coherent property snapshot; no mpv-owned pointers escape its lifetime.
+    struct ChapterList {
+        mpv_node node{};
+        ~ChapterList() { mpv_free_node_contents(&node); }
+    } chapters;
+    if (mpv_get_property(player.mpv, "chapter-list", MPV_FORMAT_NODE, &chapters.node) < 0 ||
+        chapters.node.format != MPV_FORMAT_NODE_ARRAY || !chapters.node.u.list) return "[]";
+    const mpv_node_list &list = *chapters.node.u.list;
+    if (list.num > 0 && !list.values) return "[]";
+    std::ostringstream json;
+    json.imbue(std::locale::classic());
+    json << std::setprecision(std::numeric_limits<double>::max_digits10) << '[';
+    bool first = true;
+    for (int index = 0; index < list.num; ++index) {
+        const mpv_node &entry = list.values[index];
+        if (entry.format != MPV_FORMAT_NODE_MAP || !entry.u.list) continue;
+        const mpv_node_list &fields = *entry.u.list;
+        if (!fields.keys || !fields.values) continue;
+        double time = -1;
+        std::string title;
+        for (int field = 0; field < fields.num; ++field) {
+            if (!fields.keys[field]) continue;
+            const std::string key = fields.keys[field];
+            const mpv_node &value = fields.values[field];
+            if (key == "time") {
+                if (value.format == MPV_FORMAT_DOUBLE) time = value.u.double_;
+                else if (value.format == MPV_FORMAT_INT64) time = static_cast<double>(value.u.int64);
+            } else if (key == "title" && value.format == MPV_FORMAT_STRING && value.u.string) {
+                title = trimmed(value.u.string);
+            }
+        }
+        if (!std::isfinite(time) || time < 0) continue;
+        if (!first) json << ',';
+        first = false;
+        json << "{\"startTime\":" << time << ",\"title\":" << jsonString(title) << '}';
+    }
+    json << ']';
+    return json.str();
 }
 
 void removeExternalSubtitleTracks(Player &player) {
@@ -772,6 +821,29 @@ JNI_METHOD(jstring, audioTracksJson)(JNIEnv *env, jobject, jlong handle) {
     return withPlayer(env, handle, [&](Player &p) {
         std::string json = audioTracksJson(p);
         return env->NewStringUTF(json.c_str());
+    });
+}
+JNI_METHOD(jstring, chaptersJson)(JNIEnv *env, jobject, jlong handle) {
+    return guarded(env, [&] {
+        auto player = playerFromHandle(handle);
+        if (!player) return env->NewStringUTF("[]");
+        std::lock_guard<std::mutex> lock(player->operations);
+        if (!player->mpv || player->stopping) return env->NewStringUTF("[]");
+        return env->NewStringUTF(chaptersJson(*player).c_str());
+    });
+}
+JNI_METHOD(void, toggleStatsOverlay)(JNIEnv *env, jobject, jlong handle) {
+    guarded(env, [&] {
+        auto player = playerFromHandle(handle);
+        if (!player) return;
+        std::lock_guard<std::mutex> lock(player->operations);
+        if (!player->mpv || player->stopping) return;
+        // The matching stats.lua is embedded in libmpv and loaded once per player.
+        // Match upstream's void JNI contract: diagnose failure without stopping playback.
+        const char *command[] = {"script-binding", "stats/display-stats-toggle", nullptr};
+        int result = mpv_command(player->mpv, command);
+        if (result < 0)
+            std::fprintf(stderr, "Linux mpv stats overlay: %s\n", mpv_error_string(result));
     });
 }
 JNI_METHOD(jboolean, selectAudioTrack)(JNIEnv *env, jobject, jlong handle, jint trackId) {

@@ -3,6 +3,7 @@ package com.nuvio.app.features.player.desktop
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.double
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -34,6 +35,293 @@ import javax.swing.SwingUtilities
 class LinuxNativePlayerBridgeTest {
     private fun enabled(): Boolean = DesktopHostOs.current == DesktopHostOs.LINUX &&
         System.getProperty("nuvio.linux.nativeSmokeTest") == "true"
+
+    @Test
+    fun realChaptersPreserveSchemaPrecisionAndTitlesAndQueriesCanRaceClose() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-chapters-")
+        val source = directory.resolve("chapters.mkv")
+        val host = NativePlayerHost()
+        var frame: Frame? = null
+        var handle = 0L
+        val readerFailure = AtomicReference<Throwable?>(null)
+        var reader: Thread? = null
+        try {
+            LinuxChapterFixture.write(source)
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            val loaded = CountDownLatch(1)
+            val restarted = CountDownLatch(1)
+            handle = create(drawable, source.toString(), NativePlayerEventSink { type, _ ->
+                if (type == "fileLoaded") loaded.countDown()
+                if (type == "playbackRestart") restarted.countDown()
+            })
+            assertTrue(loaded.await(20, TimeUnit.SECONDS))
+            val expected = LinuxChapterFixture.chapters
+            fun checkChapters() {
+                val json = NativePlayerBridge.chaptersJson(handle)
+                assertTrue(json.all { it.code < 128 }, "JNI JSON must encode non-ASCII safely")
+                val chapters = Json.parseToJsonElement(json).jsonArray
+                assertEquals(expected.size, chapters.size)
+                chapters.forEachIndexed { index, value ->
+                    val chapter = value.jsonObject
+                    assertEquals(setOf("startTime", "title"), chapter.keys)
+                    assertEquals(expected[index].seconds, chapter.getValue("startTime").jsonPrimitive.double, 1e-9)
+                    assertEquals(expected[index].title?.trim() ?: "(unnamed)",
+                        chapter.getValue("title").jsonPrimitive.content, "Chapter $index")
+                }
+            }
+            checkChapters() // FILE_LOADED
+            assertTrue(restarted.await(20, TimeUnit.SECONDS))
+            checkChapters() // PLAYBACK_RESTART
+            NativePlayerBridge.seekTo(handle, 2000)
+            await { NativePlayerBridge.positionMs(handle) >= 1900 }
+            checkChapters()
+            repeat(1000) { checkChapters() }
+            val closing = handle
+            val started = CountDownLatch(1)
+            reader = Thread {
+                try {
+                    repeat(1000) {
+                        val chapters = Json.parseToJsonElement(NativePlayerBridge.chaptersJson(closing)).jsonArray
+                        assertTrue(chapters.isEmpty() || chapters.size == expected.size)
+                        started.countDown()
+                    }
+                } catch (failure: Throwable) { readerFailure.set(failure); started.countDown() }
+            }.apply { start() }
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            NativePlayerBridge.dispose(handle)
+            handle = 0L
+            reader.join(10000)
+            assertFalse(reader.isAlive, "Chapter query hung during close")
+            assertEquals(null, readerFailure.get())
+            for (invalid in listOf(0L, closing, Long.MAX_VALUE)) {
+                assertEquals("[]", NativePlayerBridge.chaptersJson(invalid))
+                NativePlayerBridge.toggleStatsOverlay(invalid)
+            }
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            reader?.join(10000)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun builtinStatsToggleOnOffAndCloseVisibleAgainstRealMpv() = statsToggle(support = true)
+
+    @Test
+    fun liveChapterPropertyHandlesMissingMalformedTitlesAndPreservesMpvOrder() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-chapter-property-")
+        val source = directory.resolve("video.mkv")
+        val script = directory.resolve("replace-chapters.lua")
+        val host = NativePlayerHost()
+        var frame: Frame? = null
+        var handle = 0L
+        try {
+            LinuxChapterFixture.write(source, emptyList())
+            // Go through real mpv's node setter: it discards invalid entries/times,
+            // exposes absent/non-string titles without a container's fallback, and
+            // allows testing updates and invalid UTF-8 without mocking native JSON.
+            Files.writeString(script, """
+                mp.register_event('file-loaded', function()
+                    assert(mp.set_property_native('chapter-list', {
+                        {time=2, title=42}, {time=0},
+                        {time=0.125, title='bad' .. string.char(255)},
+                        {time=0.5, title=' x\n'}, {time=-1, title='invalid'},
+                        {time=0/0, title='invalid'}, 'invalid'
+                    }))
+                end)
+            """.trimIndent())
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            handle = create(drawable, source.toString(), extraMpvOptions = arrayOf("scripts=$script"))
+            await { Json.parseToJsonElement(NativePlayerBridge.chaptersJson(handle)).jsonArray.size == 4 }
+            val chapters = Json.parseToJsonElement(NativePlayerBridge.chaptersJson(handle)).jsonArray
+            assertEquals(listOf(2.0, 0.0, 0.125, 0.5), chapters.map {
+                it.jsonObject.getValue("startTime").jsonPrimitive.double
+            })
+            assertEquals(listOf("", "", "bad\uFFFD", "x"), chapters.map {
+                it.jsonObject.getValue("title").jsonPrimitive.content
+            })
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun unavailableStatsDoesNotInterruptPlayback() = statsToggle(support = false)
+
+    @Test
+    fun controllerReplacementClearsChaptersAndStatsAndExistingHudConsumesChapters() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-chapter-replacement-")
+        val chaptered = directory.resolve("chapters.mkv")
+        val unchaptered = directory.resolve("no-chapters.mkv")
+        val observer = LinuxStatsObserver(directory)
+        val settings = com.nuvio.app.features.player.PlayerSettingsRepository
+        val previous = settings.uiState.value
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val error = AtomicReference<String?>(null)
+        val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+        val hudResults = LinkedBlockingQueue<Int>()
+        val hoverResults = LinkedBlockingQueue<Int>()
+        var frame: Frame? = null
+        try {
+            LinuxChapterFixture.write(chaptered)
+            LinuxChapterFixture.write(unchaptered, emptyList())
+            settings.setDesktopMpvConfigMode(com.nuvio.app.features.player.DesktopMpvConfigMode.Replace)
+            settings.setDesktopCustomMpvOptions(observer.option + "\nao=null")
+            SwingUtilities.invokeAndWait { frame = videoFrame(host).apply { setSize(1280, 720) } }
+            var outgoing = 0L
+            repeat(21) { iteration ->
+                val hasChapters = iteration % 2 == 0
+                val loaded = CountDownLatch(1)
+                observer.reset()
+                SwingUtilities.invokeAndWait {
+                    controller.setControlCallbacks({ false }, { type, value ->
+                        when (type) {
+                            "fileLoaded" -> loaded.countDown()
+                            "chapterParity" -> hudResults.add(value.toInt())
+                            "chapterHover" -> hoverResults.add(value.toInt())
+                            "toggleMpvDiagnostics" -> controller.setDiagnosticsOverlayEnabled(value > 0)
+                        }
+                        false
+                    }, { false }, { false })
+                    attachLocalVideo(controller, if (hasChapters) chaptered else unchaptered, error,
+                        enableUserMpvOptions = true)
+                }
+                assertTrue(loaded.await(20, TimeUnit.SECONDS), "Replacement $iteration failed: ${error.get()}")
+                await { handleField.getLong(controller).let { it != 0L && it != outgoing } }
+                val handle = handleField.getLong(controller)
+                if (outgoing != 0L) assertEquals("[]", NativePlayerBridge.chaptersJson(outgoing))
+                val chapters = controller.getChapters()
+                assertEquals(if (hasChapters) LinuxChapterFixture.chapters.size else 0, chapters.size)
+                await { observer.visible() == false }
+                // Exercise the same Kotlin -> controls JSON -> real WebKit path used by PlayerScreen.
+                if (iteration < 2) {
+                    SwingUtilities.invokeAndWait {
+                        controller.updateControls(com.nuvio.app.features.player.PlayerControlsState(
+                            chapters = chapters, durationMs = 3602000L,
+                        ))
+                    }
+                    val expectedMarkers = if (hasChapters) LinuxChapterFixture.chapters.count {
+                        it.seconds > 0 && (it.title == null || it.title.isNotBlank())
+                    } else 0
+                    await {
+                        NativePlayerBridge.runJavaScript(handle, """
+                            window.webkit.messageHandlers.player.postMessage({type:'chapterParity',
+                                value:document.querySelectorAll('#chapterMarkers .chapter-marker').length});
+                        """.trimIndent())
+                        hudResults.poll(100, TimeUnit.MILLISECONDS) == expectedMarkers
+                    }
+                    hudResults.clear()
+                    val unicodeTitle = Json.encodeToString(LinuxChapterFixture.chapters[2].title!!.trim())
+                    val longTitle = Json.encodeToString(LinuxChapterFixture.chapters[8].title!!)
+                    NativePlayerBridge.runJavaScript(handle, """
+                        (() => {
+                            const r = document.getElementById('seek').getBoundingClientRect();
+                            const hover = seconds => showChapterTooltipAt({clientX:r.left+r.width*seconds/3602});
+                            let result = 0;
+                            if ($hasChapters) {
+                                hover(0.5);
+                                if (chapterTooltip.textContent === $unicodeTitle && !chapterTooltip.hidden) result |= 1;
+                                hover(2.75);
+                                if (chapterTooltip.textContent === $longTitle) result |= 2;
+                                const markers = document.querySelectorAll('#chapterMarkers .chapter-marker');
+                                // CSSOM rounds serialized percentages; allow 0.04 ms at this duration.
+                                if (Math.abs(parseFloat(markers[0].style.left)-0.125/3602*100) < 1e-6) result |= 4;
+                                if (Math.abs(parseFloat(markers[markers.length-1].style.left)-3601.999/3602*100) < 1e-4) result |= 8;
+                            } else {
+                                hover(0.5); if (chapterTooltip.hidden) result = 15;
+                            }
+                            window.webkit.messageHandlers.player.postMessage({type:'chapterHover',value:result});
+                        })();
+                    """.trimIndent())
+                    assertEquals(15, hoverResults.poll(5, TimeUnit.SECONDS), "Chapter hover text/positions failed")
+                    // The existing HUD toggle goes through its real event and controller state guard.
+                    NativePlayerBridge.runJavaScript(handle, "window.nuvioToggleMpvDiagnostics();")
+                } else SwingUtilities.invokeAndWait { controller.setDiagnosticsOverlayEnabled(true) }
+                await { observer.visible() == true }
+                SwingUtilities.invokeAndWait { controller.setDiagnosticsOverlayEnabled(true) }
+                Thread.sleep(50)
+                assertEquals(true, observer.visible(), "Setting enabled twice toggled the overlay off")
+                outgoing = handle // replace while visible; next player must start hidden
+            }
+            SwingUtilities.invokeAndWait { controller.dispose() }
+            assertEquals("[]", NativePlayerBridge.chaptersJson(outgoing))
+            assertEquals(null, error.get())
+            println("Chapter/stats replacement: replacements=20 staleChapters=0 statsReset=20 closeVisible=true")
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            settings.setDesktopCustomMpvOptions(previous.desktopCustomMpvOptions)
+            settings.setDesktopMpvConfigMode(previous.desktopMpvConfigMode)
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    private fun statsToggle(support: Boolean) {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-stats-")
+        val source = directory.resolve("video.y4m")
+        val observer = LinuxStatsObserver(directory)
+        val host = NativePlayerHost()
+        var frame: Frame? = null
+        var handle = 0L
+        try {
+            writeLocalVideo(source)
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            val restarted = CountDownLatch(1)
+            handle = create(drawable, source.toString(), NativePlayerEventSink { type, _ ->
+                if (type == "playbackRestart") restarted.countDown()
+            }, extraMpvOptions = arrayOf(observer.option) +
+                if (support) emptyArray() else arrayOf("load-stats-overlay=no"))
+            assertTrue(restarted.await(20, TimeUnit.SECONDS))
+            await { observer.visible() == false }
+            assertEquals("no", observer.state()!!.getValue("config").jsonPrimitive.content)
+            assertEquals("no", observer.state()!!.getValue("osc").jsonPrimitive.content)
+            assertEquals("auto", observer.state()!!.getValue("hwdec").jsonPrimitive.content)
+            assertEquals("gpu-next", observer.state()!!.getValue("vo").jsonPrimitive.content)
+            repeat(if (support) 10 else 1) {
+                NativePlayerBridge.toggleStatsOverlay(handle)
+                if (support) {
+                    await { observer.visible() == true }
+                    NativePlayerBridge.toggleStatsOverlay(handle)
+                    await { observer.visible() == false }
+                } else {
+                    Thread.sleep(200)
+                    assertEquals(false, observer.visible())
+                }
+            }
+            NativePlayerBridge.setPaused(handle, false)
+            val initial = NativePlayerBridge.positionMs(handle)
+            await { NativePlayerBridge.positionMs(handle) > initial + 200 }
+            if (support) {
+                NativePlayerBridge.toggleStatsOverlay(handle)
+                await { observer.visible() == true }
+            }
+            NativePlayerBridge.dispose(handle) // including the visible script/OSD
+            handle = 0L
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            directory.toFile().deleteRecursively()
+        }
+    }
 
     @Test
     fun libraryLoadsAndRejectsMissingDrawable() {
@@ -1401,11 +1689,13 @@ class LinuxNativePlayerBridgeTest {
         controller: NativePlayerController,
         source: java.nio.file.Path,
         error: AtomicReference<String?>,
+        enableUserMpvOptions: Boolean = false,
     ) = controller.attach(
         sourceUrl = source.toString(), sourceAudioUrl = null, sourceHeaders = emptyMap(),
         playWhenReady = false, initialPositionMs = 0L,
         nvidiaRtxSuperResolutionEnabled = false, nvidiaRtxHdrEnabled = false,
         onError = { error.set(it ?: "Native attach failed") },
+        enableUserMpvOptions = enableUserMpvOptions,
     )
 
     private fun writeLocalVideo(source: java.nio.file.Path, firstLuma: Int = 128, lumaStep: Int = 0) {

@@ -60,8 +60,10 @@ and its thumbnail probe checks the helper's effective software-only options.
 - `setSubtitleDelayMs`, `setSubtitleAssStyleMode`, `applySubtitleStyle`: basic mpv
   property mapping required by the shared controller's startup configuration. This
   is not the full upstream ASS track-sensitive styling system.
-- `selectSubtitleTrack`: basic `sid` mapping, including disabling subtitles during
-  startup. Track enumeration/UI is still deferred.
+- Audio/subtitle track enumeration and selection, and external subtitle management,
+  through the existing shared track menus.
+- `chaptersJson`, `toggleStatsOverlay`: chapter metadata and mpv diagnostics, as
+  described below.
 - `updateControls`, `runJavaScript`: the existing controls page runs in WebKitGTK.
 - `setCursorHidden`: cursor visibility on the GTK controls overlay, as requested by
   the existing HUD. No global cursor/hotkey integration is added.
@@ -163,6 +165,53 @@ Preview failure leaves the existing timestamp-only HUD; real streaming validatio
 is still required. The opt-in smoke suite explicitly builds a separate phase-gated
 test executable; those hooks are not compiled into the JNI library.
 
+## Chapters and mpv diagnostics
+
+`chaptersJson(Long): String` reads one live mpv `chapter-list` node snapshot and
+returns `[{"startTime":0.125,"title":"Chapter title"}]`. Times are floating-point
+seconds with double precision, in mpv order. There is no index or selected-state
+field, and no separate chapter-selection API: the shared timeline seeks in
+milliseconds. Invalid/non-finite/negative times are omitted; missing titles become
+empty strings. Demuxer-supplied names are preserved, including mpv's `(unnamed)`
+for a Matroska chapter without a display name. Linux trims titles using GLib's
+Unicode-aware rules, broadly aligned with macOS. Windows trims a narrower ASCII
+set (space, tab, CR, LF), and the shared HUD may apply additional JavaScript-side
+trimming. Whitespace normalization is therefore not guaranteed to be byte-for-byte
+identical across platforms; the chapter JSON schema and functional behavior remain
+unchanged. Titles use the existing JSON escaping helper. Empty/unavailable properties and
+missing/closing handles return `[]`. The node is freed before returning, under the
+same lifecycle lock as other mpv operations; no cache or polling thread is added.
+
+The shared player queries chapters after source/duration initialization and sends
+them in its controls-state JSON, separately from native playback snapshots. The
+existing HUD displays named chapter markers and hover/seek-preview titles; it
+filters blank titles and sorts by time. It does not provide a chapter menu or
+current-chapter field. Source replacement recreates the native player, so queries
+cannot retain the old source's chapters. Changes within a single source retain
+the existing shared refresh behavior.
+
+`toggleStatsOverlay(Long): void` sends the upstream command
+`script-binding stats/display-stats-toggle`. The matching mpv 0.41 `stats.lua` is
+embedded in the private libmpv's LuaJIT-enabled build and loaded once per player.
+It needs no loose script, installation path, user configuration, or runtime
+change. `config=no` and `osc=no` remain enabled; neither disables built-in stats.
+The script renders through mpv's OSD, below the transparent WebKit HUD. Existing
+MPV diagnostics menu/shortcut wiring toggles it on/off without creating another
+script instance. Source replacement resets it to hidden; disposal destroys its
+script and overlay. The thumbnail decoder remains independent.
+
+As on Windows/macOS, the JNI toggle has no boolean return. A command failure
+(for example, `load-stats-overlay=no`) produces a stderr diagnostic and leaves
+playback running. The existing shared UI cannot acknowledge failure through this
+void contract. Missing/closed handles are safe no-ops. Linux adds no stats pages
+or custom diagnostics panel; page rendering and behavior remain mpv-owned.
+
+The opt-in native suite generates a small MJPEG Matroska with 111 adversarial
+chapters, exercises the real JNI/JSON and HUD paths, races queries against close,
+and replaces chaptered/unchaptered sources 20 times with stats visible. Stats
+tests observe the built-in script's active page bindings and cover absent support.
+These fixtures and observers are test-only and require no external encoder.
+
 ## Deliberately absent
 
 `setMediaSessionMetadata` remains an explicit void no-op: Linux media sessions
@@ -171,11 +220,9 @@ owns exposes and resize redraws. These calls do not claim playback success or
 supply invented playback state.
 
 Every other unexported `NativePlayerBridge` method remains unsupported and raises
-`UnsatisfiedLinkError` if called: track/chapter enumeration, audio track selection, external
-subtitle management, video/SVP profiling, stats
-scripts, native window chrome/fullscreen/PiP, gamepads, media identity and system
-idle/foreground queries. Track discovery is currently caught by the shared
-controller and provides no track UI. Optional shortcuts for these deferred
+`UnsatisfiedLinkError` if called: video/SVP profiling,
+native window chrome/fullscreen/PiP, gamepads, media identity and system
+idle/foreground queries. Optional shortcuts for these deferred
 features should not be used during acceptance testing.
 
 No PiP, gamepads, media keys, screensaver inhibition, Linux native fullscreen,
