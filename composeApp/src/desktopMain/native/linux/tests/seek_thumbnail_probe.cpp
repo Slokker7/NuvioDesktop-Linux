@@ -1,10 +1,31 @@
 // Standalone real-libmpv integration harness. Phase gates are absent from JNI builds.
 #include "seek_thumbnails.h"
+#include <mpv/client.h>
 #include <chrono>
 #include <clocale>
 #include <condition_variable>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
+#include <utility>
+
+extern "C" int __real_mpv_initialize(mpv_handle *);
+extern "C" int __wrap_mpv_initialize(mpv_handle *mpv) {
+    const int result = __real_mpv_initialize(mpv);
+    if (result < 0) return result;
+    // Check the real auxiliary player's effective options, independent of GPU availability.
+    // Link wrapping is confined to this test executable; production has no interception.
+    for (const auto &[name, expected] : {std::pair{"hwdec", "no"}, std::pair{"vo", "null"}}) {
+        char *value = mpv_get_property_string(mpv, name);
+        const bool matches = value && std::string(value) == expected;
+        mpv_free(value);
+        if (!matches) {
+            std::cerr << "Thumbnail policy violation: " << name << std::endl;
+            std::abort();
+        }
+    }
+    return result;
+}
 
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

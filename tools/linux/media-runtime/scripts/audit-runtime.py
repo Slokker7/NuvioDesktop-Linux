@@ -2,6 +2,7 @@
 """Read-only audit of trusted, project-built ELF files; fail closed on unknown deps."""
 import argparse, fnmatch, hashlib, json, os, pathlib, re, subprocess, sys
 from artifact_contract import build_features, definitions, layout_errors, verify_inventory
+from source_patches import verify as verify_patches
 
 TOOLS = pathlib.Path(__file__).resolve().parents[1]
 POLICY = json.loads((TOOLS / 'manifest.json').read_text())
@@ -24,6 +25,8 @@ def audit(root, build_dir=None):
     if not inventory: errors.append('Missing artifact inventory')
     errors.extend(layout_errors(root))
     try: verify_inventory(root)
+    except (ValueError, OSError) as exc: errors.append(str(exc))
+    try: verify_patches(root, build_dir.parent / 'src' if build_dir is not None else None)
     except (ValueError, OSError) as exc: errors.append(str(exc))
     metadata = root / 'share/nuvio-media-runtime'
     features = json.loads((metadata / 'compile-features.json').read_text())

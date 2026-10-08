@@ -9,7 +9,8 @@ import re
 import struct
 import tempfile
 from runtime_features import (command, query_features, check_features,
-                              validate_playback_report, PLAYBACK_VECTORS)
+                              validate_playback_report, PLAYBACK_VECTORS,
+                              hwdec_candidates, selected_hwdec, validate_hwdec_policy)
 
 TOOLS = pathlib.Path(__file__).resolve().parents[1]
 VECTORS = PLAYBACK_VECTORS
@@ -25,7 +26,7 @@ def fixture(directory, name, vector, extension='mkv'):
     return path
 
 
-def video(root, directory, name, vector, hwdec='no'):
+def video(root, directory, name, vector, hwdec='no', log_path=None):
     source = fixture(directory, name, vector)
     probe = json.loads(command([root / 'bin/ffprobe', '-v', 'error', '-show_entries',
         'stream=codec_name,profile,pix_fmt,width,height,r_frame_rate,bits_per_raw_sample',
@@ -42,6 +43,8 @@ def video(root, directory, name, vector, hwdec='no'):
     playback = command([root / 'bin/mpv', '--no-config', '--vo=image',
         '--vo-image-format=png', '--vo-image-outdir=' + str(frames), '--ao=null',
         '--hwdec=' + hwdec, '--frames=' + str(expected), '--msg-level=vd=debug', source])
+    if log_path is not None:
+        log_path.write_text(playback)
     images = sorted(frames.glob('*.png'))
     if len(images) != expected:
         raise ValueError(f'mpv output frame count mismatch: {name}: {len(images)} != {expected}')
@@ -52,8 +55,14 @@ def video(root, directory, name, vector, hwdec='no'):
         raise ValueError('Invalid mpv image output: ' + name)
     if 'Using software decoding' not in playback or 'Exiting... (End of file)' not in playback:
         raise ValueError('Software playback did not reach clean EOF: ' + name)
+    candidates = hwdec_candidates(playback)
+    backend = selected_hwdec(playback)
+    if backend != 'no':
+        raise ValueError('CPU playback did not finish in software: ' + name)
+    validate_hwdec_policy(hwdec, candidates, backend)
     return dict(stream=probe, ffmpeg_decoded_frames=expected, mpv_output_frames=len(images),
-                hwdec=hwdec, decoding='software', reached_eof=True, result='PASS')
+                hwdec=hwdec, decoding='software', reached_eof=True, result='PASS',
+                hwdec_candidates=candidates, backend=backend)
 
 
 def progress(output, minimum):
@@ -132,12 +141,14 @@ def hardware(root, directory, name, vector, hwdec='auto'):
     state = progress(output, vector['minimum_position'])
     if 'VO: [gpu-next]' not in output:
         raise ValueError('No displayed GPU video output')
-    match = re.search(r'Using hardware decoding \(([^)]+)\)', output)
-    backend = match.group(1) if match else 'software fallback'
-    if match and state['hwdec'] != backend:
+    backend = selected_hwdec(output)
+    if state['hwdec'] != backend:
         raise ValueError('Hardware log/property mismatch')
+    candidates = hwdec_candidates(output)
+    validate_hwdec_policy(hwdec, candidates, backend)
     # Time-pos is a progress observation, not an exact rendered-frame counter.
-    return dict(result='PASS', backend=backend, minimum_position=vector['minimum_position'], reached_eof=True)
+    return dict(result='PASS', backend=backend, hwdec_candidates=candidates,
+                minimum_position=vector['minimum_position'], reached_eof=True)
 
 
 def main():
@@ -150,14 +161,22 @@ def main():
     config = json.loads((root / 'share/nuvio-media-runtime/compile-features.json').read_text())
     compiled = query_features(root)
     check_features(config, compiled)
-    report = dict(compiled=compiled, config=config, software={}, audio={}, passthrough={}, hardware={},
+    report = dict(compiled=compiled, config=config, software={}, auto_fallback={}, audio={}, passthrough={}, hardware={},
                   validated={name: 'NOT YET HARDWARE VALIDATED' for name in ('NVIDIA', 'AMD', 'Intel')})
+    if args.hardware:
+        # GPU-host testing cannot recreate the builder's absence of drivers.
+        # Retain its validated CPU-only auto evidence; test GPU selection below.
+        cpu = json.loads((root / 'share/nuvio-media-runtime/capabilities.json').read_text())
+        validate_playback_report(cpu)
+        report['auto_fallback'] = cpu['auto_fallback']
     with tempfile.TemporaryDirectory(prefix='nuvio-media-smoke-') as tmp:
         directory = pathlib.Path(tmp)
         for name, vector in sorted(VECTORS['vectors'].items()):
             report['software'][name] = video(root, directory, name, vector)
+            if not args.hardware or name == 'h264-high10':
+                report['auto_fallback'][name] = video(root, directory, name, vector, 'auto')
             if name == 'h264-high10':
-                report['software']['high10_auto_fallback'] = video(root, directory, name, vector, 'auto')
+                report['software']['high10_auto_fallback'] = report['auto_fallback'][name]
             elif args.hardware:
                 report['hardware'][name] = hardware(root, directory, name, vector)
         for name, vector in sorted(VECTORS['audio_vectors'].items()):
@@ -166,7 +185,7 @@ def main():
                 report['passthrough'][name] = audio(root, directory, name, vector, True)
     if args.hardware:
         backends = {r['backend'] for r in report['hardware'].values()}
-        if backends == {'software fallback'}:
+        if backends == {'no'}:
             raise ValueError('No real hardware backend validated')
         if any('nvdec' in b or 'cuda' in b for b in backends):
             report['validated']['NVIDIA'] = 'VALIDATED on this host only'

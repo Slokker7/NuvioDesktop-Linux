@@ -453,7 +453,21 @@
         "-Diconv=enabled",
         "-Dzlib=enabled"
       ],
-      "patches": [],
+      "patches": [
+        {
+          "file": "patches/mpv-0.41-disable-vulkan-auto-safe.patch",
+          "sha256": "9f983d2439b82154f2d05056c8cd9b12095a2f8e2fe31352b0e1c1a061863190",
+          "upstream_commit": "d20d108d94e288263a536dfaac1eda995b9a434e",
+          "upstream_url": "https://github.com/mpv-player/mpv/commit/d20d108d94e288263a536dfaac1eda995b9a434e",
+          "reason": "Backport upstream safe-selection policy: exclude Vulkan and Vulkan-copy from auto/auto-copy while retaining explicit opt-in. Original local Vulkan crash root cause remains unresolved.",
+          "source_files": {
+            "video/decode/vd_lavc.c": {
+              "before_sha256": "99ebc2888c6194da3802ee08cc4133237ee6051d6e30ae4ae84d38ef76f552c0",
+              "after_sha256": "7fba7ae2323f2d8af5153eac1cf88ed3721039e3c031a9646a30e23f3280186a"
+            }
+          }
+        }
+      ],
       "runtime_libraries": [
         "libmpv.so*"
       ]

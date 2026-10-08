@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player.desktop
 
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
@@ -95,6 +96,62 @@ class LinuxNativePlayerBridgeTest {
             SwingUtilities.invokeAndWait { frame?.dispose() }
             Files.deleteIfExists(mpvLog)
             Files.deleteIfExists(source)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
+    fun mainPlayerHardwareDecodeDefaultPreservesExplicitOverrides() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-hwdec-policy-")
+        val source = directory.resolve("video.y4m")
+        val report = directory.resolve("options.json")
+        val script = directory.resolve("options.lua")
+        val host = NativePlayerHost()
+        var frame: Frame? = null
+        var handle = 0L
+        try {
+            writeLocalVideo(source)
+            // Query effective options through libmpv. Raw video needs no hardware decoder;
+            // this tests policy/precedence, not a particular GPU or auto-selected backend.
+            Files.writeString(script, """
+                local utils = require 'mp.utils'
+                mp.register_event('file-loaded', function()
+                    local f = assert(io.open(${Json.encodeToString(report.toString())}, 'w'))
+                    f:write(utils.format_json({hwdec=mp.get_property('hwdec'),
+                        vo=mp.get_property('vo'), api=mp.get_property('gpu-api'),
+                        context=mp.get_property('gpu-context')}))
+                    f:close()
+                end)
+            """.trimIndent())
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            val cases = listOf(
+                emptyArray<String>() to "auto",
+                arrayOf("@nuvio-config-mode=full", "@nuvio-hwdec=no") to "auto",
+                arrayOf("@nuvio-user:hwdec=no") to "no",
+                arrayOf("hwdec=no", "@nuvio-user:hwdec=auto-copy") to "auto-copy",
+            )
+            for ((options, expected) in cases) {
+                Files.deleteIfExists(report)
+                handle = create(drawable, source.toString(), extraMpvOptions =
+                    arrayOf("scripts=$script") + options)
+                await { Files.exists(report) && Files.size(report) > 0 }
+                NativePlayerBridge.dispose(handle)
+                handle = 0L
+                val values = Json.parseToJsonElement(Files.readString(report)).jsonObject
+                assertEquals(expected, values.getValue("hwdec").jsonPrimitive.content)
+                assertEquals("gpu-next", values.getValue("vo").jsonPrimitive.content)
+                assertEquals("vulkan", values.getValue("api").jsonPrimitive.content)
+                assertEquals("x11vk", values.getValue("context").jsonPrimitive.content)
+            }
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            for (file in listOf(report, script, source)) Files.deleteIfExists(file)
             Files.deleteIfExists(directory)
         }
     }

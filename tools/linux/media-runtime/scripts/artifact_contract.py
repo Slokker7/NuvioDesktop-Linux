@@ -13,6 +13,7 @@ import pathlib
 import re
 import stat
 from runtime_features import validate_playback_report
+from source_patches import verify as verify_patches
 
 TOOLS = pathlib.Path(__file__).resolve().parents[1]
 POLICY = json.loads((TOOLS / 'manifest.json').read_text())
@@ -112,6 +113,7 @@ def seal(root):
 
 def validate_marker(root):
     verify_inventory(root)
+    verify_patches(root)
     errors = layout_errors(root)
     if errors:
         raise ValueError('; '.join(errors))

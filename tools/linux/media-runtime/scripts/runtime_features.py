@@ -12,6 +12,41 @@ PLAYBACK_VECTORS = json.loads((pathlib.Path(__file__).resolve().parents[1] /
                               'tests/vectors.json').read_text())
 
 
+def hwdec_candidates(output):
+    """mpv 0.41: post-whitelist, before copy filtering/device creation.
+
+    Keep codec-qualified names and log order. Renderer messages are unrelated.
+    'Trying hardware decoding via' occurs too late to observe failed devices.
+    """
+    return re.findall(r'^\[vd\] Looking at hwdec ([a-z0-9_-]+)\.\.\.\s*$', output, re.M)
+
+
+def selected_hwdec(output):
+    """Final decoding outcome, not candidate consideration or device creation."""
+    # mpv's console info-level hardware message omits the module prefix;
+    # verbose software messages (and prefixed diagnostics) retain [vd].
+    matches = re.findall(r'^(?:\[vd\] )?Using (?:hardware decoding \(([a-z0-9_-]+)\)|'
+                         r'(software) decoding)\.\s*$', output, re.M)
+    if not matches:
+        raise ValueError('Missing actual decoding outcome')
+    hardware, _ = matches[-1]
+    return hardware if hardware else 'no'
+
+
+def validate_hwdec_policy(mode, candidates, backend):
+    if mode not in ('auto', 'auto-safe', 'auto-copy', 'auto-copy-safe'):
+        return  # Explicit Vulkan is intentional opt-in.
+    # Normalize only the optional codec prefix, not arbitrary renderer text.
+    if any(re.fullmatch(r'(?:[a-z0-9_]+-)?vulkan(?:-copy)?', name) for name in candidates):
+        raise ValueError('Safe automatic selection considered Vulkan')
+    if backend in ('vulkan', 'vulkan-copy'):
+        raise ValueError('Safe automatic selection chose Vulkan')
+    # A direct candidate can be logged before mpv's copy filter; selecting one
+    # is different, and would violate auto-copy semantics.
+    if mode in ('auto-copy', 'auto-copy-safe') and backend != 'no' and not backend.endswith('-copy'):
+        raise ValueError('Safe auto-copy selected a non-copy backend')
+
+
 def validate_playback_report(report):
     """Require successful child evidence before accepting its PASS summary.
 
@@ -39,6 +74,17 @@ def validate_playback_report(report):
         require(type(value) is int and value >= minimum,
                 field + '.' + key + ' must be an integer >= ' + str(minimum))
 
+    def software_hwdec(child, field):
+        candidates = child.get('hwdec_candidates')
+        require(isinstance(candidates, list) and all(isinstance(x, str) and
+                re.fullmatch(r'[a-z0-9_-]+', x) for x in candidates),
+                field + '.hwdec_candidates must be an array of hwdec names')
+        equal(child, 'backend', 'no', field)
+        try:
+            validate_hwdec_policy(child['hwdec'], candidates, child['backend'])
+        except ValueError as exc:
+            require(False, field + ': ' + str(exc))
+
     require(isinstance(report, dict), 'root must be an object')
     software = object_at(report, 'software', 'software')
     videos = dict(PLAYBACK_VECTORS['vectors'])
@@ -55,6 +101,21 @@ def validate_playback_report(report):
         equal(child, 'hwdec', 'auto' if name == 'high10_auto_fallback' else 'no', field)
         equal(child, 'decoding', 'software', field)
         equal(child, 'reached_eof', True, field)
+        software_hwdec(child, field)
+
+    auto = object_at(report, 'auto_fallback', 'auto_fallback')
+    for name, vector in PLAYBACK_VECTORS['vectors'].items():
+        field = 'auto_fallback.' + name
+        child = object_at(auto, name, field)
+        for key, value in (('result', 'PASS'), ('hwdec', 'auto'),
+                           ('decoding', 'software'), ('reached_eof', True)):
+            equal(child, key, value, field)
+        for key in ('ffmpeg_decoded_frames', 'mpv_output_frames'):
+            count(child, key, vector['expected_frames'], field)
+        stream = object_at(child, 'stream', field + '.stream')
+        for key, value in vector['stream'].items():
+            equal(stream, key, value, field + '.stream')
+        software_hwdec(child, field)
 
     audio = object_at(report, 'audio', 'audio')
     for name, vector in PLAYBACK_VECTORS['audio_vectors'].items():
@@ -123,7 +184,7 @@ def check_features(config, actual):
     for name in ('cuda', 'vaapi', 'drm', 'vulkan'):
         if name not in actual['ffmpeg_hwaccels']:
             raise ValueError('Missing hardware context: ' + name)
-    for name in ('nvdec', 'vaapi', 'vaapi-copy', 'vulkan'):
+    for name in ('nvdec', 'vaapi', 'vaapi-copy', 'vulkan', 'vulkan-copy'):
         if not any(x.startswith(name + ' ') for x in actual['mpv_hwdec_modes']):
             raise ValueError('Missing mpv compiled mode: ' + name)
     for name in ('CONFIG_H264_NVDEC_HWACCEL', 'CONFIG_HEVC_VAAPI_HWACCEL',

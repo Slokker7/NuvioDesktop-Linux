@@ -2,8 +2,8 @@
 
 This is the shared source/version/feature policy for a project-built FFmpeg and
 libmpv runtime. It is development infrastructure, **not completed packaging**.
-The existing Linux JNI bridge consumes it through `MPV_ROOT`; no production
-player options or JNI APIs change.
+The existing Linux JNI bridge consumes it through `MPV_ROOT`. The runtime build
+does not set player options or change JNI APIs.
 
 A distro libmpv may omit codecs or interop features. Homebrew was useful for
 investigation but brings a moving dependency closure, development paths and a
@@ -69,8 +69,9 @@ References: [Ubuntu release lifecycle](https://ubuntu.com/about/release-cycle),
 ## Manifest and feature policy
 
 `manifest.json` is canonical. It records immutable archives and verified SHA-256s,
-licenses, classifications, reasons, options and patch lists. There are currently
-no patches. FFmpeg's detached signature is verified with a pinned key fingerprint;
+licenses, classifications, reasons, options and patch lists. mpv 0.41.0 has one
+upstream safety-policy backport, described below; all dependency pins are unchanged.
+FFmpeg's detached signature is verified with a pinned key fingerprint;
 other archives are hash-verified official release/tag material. libdisplay-info's
 original release archive is obtained from Debian's official source mirror.
 
@@ -141,15 +142,83 @@ Reference: [nv-codec-headers compatibility](https://github.com/FFmpeg/nv-codec-h
 ## Renderer and decoder
 
 Rendering and decoding are separate. Production remains `vo=gpu-next`,
-`gpu-api=vulkan`, `gpu-context=x11vk`; **production hwdec is not enabled here**.
-A future candidate is upstream `hwdec=auto` with software fallback after more
-validation. Software decode works without GPU drivers in the CPU smoke tier.
+`gpu-api=vulkan`, `gpu-context=x11vk`. The Linux main bridge defaults to upstream
+`hwdec=auto`, before explicit user options, with mpv's normal software fallback.
+mpv owns backend safety selection; Nuvio does not maintain a vendor-specific
+decoder list. Software decode works without GPU drivers in the CPU smoke tier.
 Displaying the current Vulkan renderer still requires a usable graphics
 implementation; decode fallback is not a new renderer fallback.
 
 The existing windowless seek-thumbnail player remains `hwdec=no`, `vo=null`.
 Its scaling, JPEG, temporary output and network loading contract must be validated
 with the unchanged native tests.
+
+### Upstream safe-selection backport
+
+mpv remains **0.41.0**, with the two whitelist removals from upstream commit
+[`d20d108d94e288263a536dfaac1eda995b9a434e`](https://github.com/mpv-player/mpv/commit/d20d108d94e288263a536dfaac1eda995b9a434e).
+The explicit patch is `patches/mpv-0.41-disable-vulkan-auto-safe.patch`.
+It removes `HWDEC_FLAG_WHITELIST` from `vulkan` and `vulkan-copy`, retaining
+`HWDEC_FLAG_AUTO` and all compiled Vulkan Video features. Explicit
+`hwdec=vulkan` and `hwdec=vulkan-copy` remain available for expert opt-in.
+The Vulkan renderer is unchanged.
+
+Upstream removed these methods from safe automatic selection because of ongoing
+stability regressions. Backporting that decision avoids making Vulkan Video an
+automatic public decode path; it does not claim Vulkan is globally broken.
+`auto`/`auto-safe` exclude both methods, and `auto-copy` excludes Vulkan-copy.
+For the relevant methods compiled here, safe candidates are NVDEC, VAAPI,
+NVDEC-copy and VAAPI-copy, followed by software fallback. Availability and codec
+support still determine the result. AMD/Intel physical hardware remains unvalidated.
+
+The original local HEVC-to-H.264 Vulkan Video crash inside NVIDIA's fence wait
+has **no established root cause**. A subsequent forensic campaign completed
+637 replacements without reproducing it. This backport adopts upstream policy;
+it does not fix or explain that crash. Explicit Vulkan retains that unresolved
+risk on the tested stack.
+
+The manifest records upstream provenance, patch SHA-256 and before/after source
+hashes. The builder verifies those hashes, applies with zero fuzz, and checks the
+resulting source before compilation and during audit. The exported patch and
+`applied-patches.json` are inventoried; audit and publication recheck them against
+the canonical recipe. `safe-hwdec.json` records the source whitelist and compiled
+explicit modes. Changing or removing the patch changes recipe identity or fails
+validation. The CPU smoke report also rejects automatic Vulkan candidates.
+
+Candidate evidence comes from mpv 0.41's `[vd] Looking at hwdec ...` event, after
+whitelist filtering but before device creation. `hwdec_candidates` retains the
+codec-qualified names in log order; `backend` separately records actual decoding
+(`no` means software). `Trying hardware decoding via ...` is too late to detect
+failed device creation and is not proof of successful decoding. Only decoder
+events are parsed; Vulkan renderer messages do not count as decoder candidates.
+For `auto-copy`, safe direct candidates can appear before mpv's later copy filter,
+but the selected backend must be software or a copy backend. Both Vulkan methods
+remain excluded by the safe whitelist. Explicit Vulkan modes are accepted.
+
+The targeted test runs during every build. An optional displayed host diagnostic
+uses a local compatible HEVC fixture without making a GPU mandatory in CPU CI:
+
+```sh
+python3 tools/linux/media-runtime/tests/test-safe-hwdec.py "$runtime" \
+  --hardware-fixture /path/to/local-hevc-main10.mkv --output /tmp/safe-hwdec-gpu.json
+```
+
+The default targeted tier runs real H.264/HEVC playback with `auto` and `auto-copy`
+in the GPU-free builder, plus 19 parser/policy boundary cases. Its permanent
+negative-control option uses a real unpatched mpv 0.41 runtime. Run it in that
+same GPU-free builder (with these runtime/source directories mounted):
+
+```sh
+python3 tools/linux/media-runtime/tests/test-safe-hwdec.py "$runtime" \
+  --source-dir "$patched_source" --unpatched-runtime "$unpatched_runtime" \
+  --log-dir /tmp/hwdec-control-logs --output /tmp/safe-hwdec-cpu.json
+```
+
+Four positive and four negative playback controls require five decodable frames
+and software EOF. Each negative must reject actual Vulkan candidate consideration
+and demonstrate failed device creation before any `Trying` event. Omitting the
+optional unpatched runtime is explicitly reported as `NOT REQUESTED`; ordinary
+CI needs no GPU or second mpv build. Displayed tests run separately.
 
 ## Runtime structure and linkage
 
@@ -207,8 +276,10 @@ suite requires no host encoder, system FFmpeg, network or GPU.
 For each video fixture, ffprobe checks the recorded codec/profile/pixel format,
 and FFmpeg must decode five frames. mpv uses the image output for this diagnostic
 only: exactly five PNG outputs must exist and decode successfully. This rejects
-premature one-frame success. High10 repeats the output assertion with `hwdec=auto`
-to check software fallback in a CPU-only output path.
+premature one-frame success. All six video fixtures repeat the output assertion
+with `hwdec=auto` in the GPU-absent builder, requiring software decode and clean
+EOF. Automatic candidates must not include Vulkan or Vulkan-copy. The optional
+GPU tier retains this recorded CPU evidence and performs separate displayed tests.
 
 Audio decode writes PCM WAV through mpv: channel count, sample width, sample rate,
 nonzero data and minimum decoded sample counts are checked. Bounded AC-3/E-AC-3
@@ -232,12 +303,16 @@ standalone audit compares the capture with JSON and independently queries progra
 identity/version, codec, muxer and hardware-mode availability. Capability metadata must agree.
 Audit, marker creation and host verification share a playback-report validator:
 the permanent vectors define required fixtures, frame/sample minima and formats.
-Every required child must pass, including explicit High10 automatic software
+Every required child must pass, including all six automatic software
 fallback and both SPDIF progress/EOF checks; a contradictory summary is rejected.
-Failed marker creation removes any previous candidate marker. Older reports lack
-explicit video mode/EOF and PCM format fields and must be regenerated with the
-current smoke suite before resealing and revalidation; the media binaries do not
-need rebuilding for this report-only change.
+Failed marker creation removes any previous candidate marker. Older runtimes lack
+the backport and its required evidence: rebuild from the current recipe rather
+than resealing old binaries with new metadata. Already-patched binaries do not
+need recompiling for the candidate-parser correction: regenerate capabilities
+and targeted-test reports, then audit, inventory and validate the artifact.
+Old `attempted_hwdecs` reports lack required candidate/backend evidence and are
+rejected. Preserve original compilation provenance when refreshing reports;
+do not relabel old binaries as a fresh build of the updated recipe.
 No ldd/program execution occurs after structural/integrity checks fail.
 
 The inventory and completion marker detect corruption/substitution, not an
@@ -304,6 +379,55 @@ none of that is installed by this build.
 
 ## Validation status
 
+Initial safety-backport validation, before the candidate-parser correction, used
+recipe SHA-256
+`38a7c7d7b7fdb43721029db2ed1c228920a2ca545eec851b0ab8c207906ad4dc`.
+Two independent fresh builds passed source/signature/patch verification, CPU
+smoke tests, both audits, inventory/marker validation and publication. Their
+62 regular files, 31 symlinks, all modes/hashes/targets, 19 ELF records and complete
+metadata were identical, including patch provenance and safe-selection evidence.
+All six codecs produced five decodable images under `auto` and reached clean
+software EOF in the GPU-absent builder. Twenty audit mutations, 182 invalid
+playback reports and twelve build-state cases passed their expected rejection/
+recovery checks. The bridge/Kotlin build and all 21 native tests passed.
+
+On the available RTX 3050 6GB / driver 615.71.09, a bounded 4K HEVC Main10
+diagnostic selected NVDEC with `auto` and NVDEC-copy with `auto-copy`. Explicit
+Vulkan and Vulkan-copy also initialized, advanced playback and reached EOF.
+This validates one NVIDIA host, not AMD/Intel hardware or every NVIDIA profile.
+
+The patched production candidate also passed five independent JVMs with 25
+source replacements each: 95 NVDEC results and 30 High10 software fallbacks.
+All 35 HEVC-to-H.264 transitions used NVDEC at both ends. Every source advanced,
+all JVMs exited cleanly, and sampled output/decoder drops were zero. Per-source
+logs contained no automatic Vulkan candidate. CMake, ELF linkage and all five
+live process maps identified the freshly built private media libraries.
+Main-player overrides `no`, `auto-copy` and explicit `vulkan` retained precedence.
+Safe-auto seek/rapid-seek, pause/resume, close/reopen and shutdown checks passed;
+the native thumbnail probe retained `hwdec=no`, `vo=null`. Bounded PulseAudio,
+audio-track, built-in/local/HTTP-addon subtitle, HUD control and focus hide/restore
+checks passed. A 35-second 4K safe-auto sample used `cuda/p010` frames with mean
+process CPU 9.1%, GPU utilization 9.6% and decoder utilization 6.5%, and zero
+output/decoder drops. This was broadly comparable to the earlier explicit NVDEC
+diagnostic; GPU utilization includes other desktop activity.
+
+The candidate-parser correction was validated without recompiling media binaries.
+Reports regenerated from the patched runtime were byte-identical across repeated
+runs; all 19 ELF files and original compilation provenance remained unchanged.
+The permanent matrix passed 19 parser cases (9 accepted, 10 rejected), four real
+patched CPU controls, and four real unpatched CPU rejections. The unpatched
+controls completed software playback after failed Vulkan device creation, with
+no `Trying` event. The ordinary targeted entry point also rejected substituted
+unpatched binaries behind copied patched metadata. Displayed auto/auto-copy
+selected NVDEC/NVDEC-copy; explicit Vulkan/Vulkan-copy passed. Audits, inventory
+and marker verification, 20 artifact mutations and 193 invalid-report mutations
+passed. The original CPU-observation blind spot is closed; production behavior
+and the upstream backport are unchanged.
+
+The historical results below describe the **unpatched** runtime. In particular,
+its automatic Vulkan selections are not the current safe-selection policy.
+Fresh backport validation must use the new recipe identity and generated reports.
+
 `capabilities.json` distinguishes COMPILED evidence from DETECTED/VALIDATED.
 The artifact's default report is CPU-only: physical GPU validation is UNTESTED.
 Host hardware evidence belongs in separate reports, not copied into every build
@@ -360,7 +484,8 @@ are not proof of bit-for-bit reproducibility.
 ## Redistribution, source and maintenance
 
 All private components have source references, archive hashes, licenses, build
-options and empty explicit patch lists. `share/licenses` collects bundled
+options and explicit patch lists; mpv lists the one upstream backport above.
+`share/licenses` collects bundled
 component and incorporated-data notices; `inventory.json` maps exported files to hashes. The combined
 FFmpeg/OpenSSL configuration is version-3 LGPL, mpv is GPL and the complete
 application's distribution obligations still require release review. No nonfree
@@ -391,4 +516,5 @@ both the existing Homebrew and private libmpv. This correction does not change
 that pre-existing separate-audio-URL integration issue or weaken acceptance for
 it. Native Wayland, JVM namespace isolation, hybrid/AMD/Intel hardware testing,
 package dependency closure and replacement of the builder baseline remain
-separate work. No `dlmopen` or production hwdec change is introduced.
+separate work. The safety backport introduces no `dlmopen`, renderer or lifecycle
+change; the Linux main-player policy remains `hwdec=auto`.

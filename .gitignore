@@ -38,6 +38,9 @@ tools
 !/tools/linux/media-runtime/README.md
 !/tools/linux/media-runtime/build.sh
 !/tools/linux/media-runtime/manifest.json
+!/tools/linux/media-runtime/patches/
+/tools/linux/media-runtime/patches/*
+!/tools/linux/media-runtime/patches/*.patch
 !/tools/linux/media-runtime/scripts/
 /tools/linux/media-runtime/scripts/*
 !/tools/linux/media-runtime/scripts/*.py

@@ -2,11 +2,13 @@
 """Generate licenses and inventory from the exact verified build (builder only)."""
 import glob, hashlib, json, pathlib, shutil, subprocess, sys
 from artifact_contract import build_features, seal
+from source_patches import capture
 root = pathlib.Path(sys.argv[1])
 tools = pathlib.Path(__file__).resolve().parents[1]
 manifest = json.loads((tools / 'manifest.json').read_text())
 metadata = root / 'share/nuvio-media-runtime'
 shutil.copyfile(tools / 'manifest.json', metadata / 'manifest.json')
+capture(root, pathlib.Path('/work/src'))
 for source in manifest['sources']:
     if source['classification'] != 'private-built' and not source.get('incorporated_data') and not source.get('incorporated_code'): continue
     destination = root / 'share/licenses' / source['name']

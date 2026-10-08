@@ -26,10 +26,23 @@ Retrying there would change player ownership and teardown. Other GPU/runtime
 combinations and an explicit compatibility fallback remain follow-up work; an
 ordered `x11vk,x11egl` context list alone is not a validated fallback.
 
-Hardware decoding is unchanged. The current Homebrew FFmpeg linked into libmpv
-lacks NVDEC/VAAPI/Vulkan hardware decoding; enabling those APIs is a separate
-runtime/dependency milestone. Seek previews retain their independent windowless
-`vo=null` decoder configuration.
+With the [private media runtime](../../../../../tools/linux/media-runtime/README.md),
+the main player defaults to `hwdec=auto`. mpv chooses a usable backend and retains
+its normal software fallback. This default is set before custom options, so an
+explicit `hwdec=no` or another supported mode still wins. Linux continues to skip
+`@nuvio-` profile metadata; it does not import Windows decoder/profile settings.
+The renderer requirements above remain enforced after custom options. Seek
+previews retain their independent `hwdec=no`, `vo=null` configuration.
+
+The private runtime backports upstream mpv's removal of Vulkan/Vulkan-copy from
+safe automatic selection; explicit Vulkan remains available. Nuvio still requests
+`auto`, with backend safety owned by mpv. Patched-runtime tests on the available
+RTX 3050 / driver 615.71.09 selected NVDEC for the local 4K HEVC Main10 fixture;
+`auto-copy` selected NVDEC-copy, and explicit Vulkan still initialized.
+VAAPI support is compiled, but AMD/Intel hardware remains unvalidated. Decode fallback does not
+remove the established Vulkan renderer requirement. The opt-in native suite
+checks effective default/override options without requiring hardware decoding,
+and its thumbnail probe checks the helper's effective software-only options.
 
 ## Implemented contract
 

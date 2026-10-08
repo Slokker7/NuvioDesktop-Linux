@@ -44,7 +44,7 @@ def playback_mutations(baseline):
     original['software']['h264'].update(ffmpeg_decoded_frames=5, mpv_output_frames=1, result='FAIL')
     original['result'] = 'PASS'
     yield 'original_reproducer', original
-    for section in ('software', 'audio', 'passthrough'):
+    for section in ('software', 'auto_fallback', 'audio', 'passthrough'):
         for label, value in (('missing', missing), ('null', None), ('array', [])):
             yield section + '_' + label, changed((section,), value)
         for name in baseline[section]:
@@ -67,6 +67,20 @@ def playback_mutations(baseline):
         yield 'fallback_' + key + '_' + label, changed(('software', 'high10_auto_fallback', key), value)
     yield 'video_stream_null', changed(('software', 'av1', 'stream'), None)
     yield 'video_wrong_codec', changed(('software', 'hevc', 'stream', 'codec_name'), 'h264')
+    yield 'auto_unsafe_backend', changed(('auto_fallback', 'h264', 'hwdec_candidates'), ['h264-vulkan'])
+    yield 'auto_unsafe_copy', changed(('auto_fallback', 'hevc', 'hwdec_candidates'), ['hevc-vulkan-copy'])
+    yield 'auto_short_output', changed(('auto_fallback', 'av1', 'mpv_output_frames'), 1)
+    yield 'auto_not_software', changed(('auto_fallback', 'hevc', 'decoding'), 'hardware')
+    yield 'auto_missing_candidates', changed(('auto_fallback', 'h264', 'hwdec_candidates'), missing)
+    for label, value in (('null', None), ('object', {}), ('string', 'h264-nvdec'),
+                         ('non_string', [1]), ('empty_name', ['']),
+                         ('renderer_text', ['Vulkan renderer'])):
+        yield 'auto_candidates_' + label, changed(('auto_fallback', 'h264', 'hwdec_candidates'), value)
+    for label, value in (('missing', missing), ('null', None), ('hardware', 'nvdec')):
+        yield 'auto_backend_' + label, changed(('auto_fallback', 'h264', 'backend'), value)
+    yield 'fallback_alias_unsafe_candidate', changed(
+        ('software', 'high10_auto_fallback', 'hwdec_candidates'), ['h264-vulkan-copy'])
+    yield 'software_selected_hardware', changed(('software', 'h264', 'backend'), 'nvdec')
 
     for label, value in (('missing', missing), ('zero', 0), ('short', 47999), ('negative', -1),
                          ('string', '49152'), ('float', 49152.0), ('bool', True), ('null', None)):
@@ -211,6 +225,12 @@ def main():
             data['validated']['NVIDIA'] = 'VALIDATED'
             path.write_text(json.dumps(data))
         mutation('unsupported_hardware_claim', hardware_claim)
+        patch_metadata = root / 'share/nuvio-media-runtime/applied-patches.json'
+        mutation('missing_patch_provenance', lambda: patch_metadata.unlink())
+        mutation('empty_patch_provenance', lambda: patch_metadata.write_text('[]'))
+        patch = root / 'share/nuvio-media-runtime/patches/mpv-0.41-disable-vulkan-auto-safe.patch'
+        mutation('missing_patch', lambda: patch.unlink())
+        mutation('altered_patch', lambda: patch.write_text('altered upstream patch'))
 
         reset()
         # A real mpv is deliberately limited to one frame: PNG output count must

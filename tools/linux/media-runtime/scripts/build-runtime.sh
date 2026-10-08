@@ -32,6 +32,7 @@ while IFS=$'\t' read -r name hash; do
     tar --extract --file "/downloads/$hash.archive" --directory "/work/src/$name" \
         --strip-components=1 --no-same-owner --no-same-permissions
 done < <(jq -r '.sources[] | [.name,.sha256] | @tsv' "$MEDIA_MANIFEST")
+python3 /recipes/scripts/source_patches.py /work/src
 mkdir -p /work/gpg
 chmod 700 /work/gpg
 sig=$(jq -r '.sources[] | select(.name=="FFmpeg") | .signature.sha256' "$MEDIA_MANIFEST")
@@ -160,6 +161,8 @@ python3 /recipes/scripts/inventory.py "$runtime"
 # inventory. Build-time config is checked against the actual fresh build tree.
 python3 /recipes/scripts/smoke-test.py "$runtime" --output /work/logs/capabilities.json
 cp /work/logs/capabilities.json "$runtime/share/nuvio-media-runtime/capabilities.json"
+python3 /recipes/tests/test-safe-hwdec.py "$runtime" --source-dir /work/src --output /work/logs/safe-hwdec.json
+cp /work/logs/safe-hwdec.json "$runtime/share/nuvio-media-runtime/safe-hwdec.json"
 python3 /recipes/scripts/artifact_contract.py "$runtime" --seal
 python3 /recipes/scripts/audit-runtime.py "$runtime" --build-dir /work/build > /work/logs/elf-audit.json
 cp /work/logs/elf-audit.json "$runtime/share/nuvio-media-runtime/elf-audit.json"

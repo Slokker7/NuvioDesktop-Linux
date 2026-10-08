@@ -108,6 +108,15 @@ def main():
             assert (work/'runtime').resolve()==target
             results['manifest_'+change]='REJECTED: old generation cannot become canonical'
             manifest.write_text(original)
+        patch = tools / next(x for x in json.loads(original)['sources'] if x['name']=='mpv')['patches'][0]['file']
+        patch_bytes = patch.read_bytes()
+        for change in ('altered', 'missing'):
+            if change == 'altered': patch.write_bytes(patch_bytes + b'\nchanged recipe\n')
+            else: patch.unlink()
+            assert build().returncode != 0
+            assert (work/'runtime').resolve() == target
+            results['patch_' + change] = 'REJECTED: old generation cannot become canonical'
+            patch.write_bytes(patch_bytes)
     args.output.write_text(json.dumps(results,indent=2,sort_keys=True)+'\n')
     print(json.dumps(results,indent=2,sort_keys=True))
 

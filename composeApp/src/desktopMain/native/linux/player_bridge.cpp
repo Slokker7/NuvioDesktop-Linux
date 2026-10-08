@@ -594,6 +594,8 @@ JNI_METHOD(jlong, create)(
         player->mpv = mpv_create();
         if (!player->mpv) throw std::runtime_error("mpv_create failed.");
 
+        // Vendor-neutral default; explicit user options below retain precedence.
+        option(player->mpv, "hwdec", "auto");
         for (std::string entry : strings(env, extraMpvOptions)) {
             if (entry.rfind("@nuvio-user:", 0) == 0) entry.erase(0, 12);
             if (entry.rfind("@nuvio-", 0) == 0) continue; // Profile metadata, not mpv options.
