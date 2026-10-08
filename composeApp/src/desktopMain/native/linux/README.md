@@ -28,9 +28,10 @@ ordered `x11vk,x11egl` context list alone is not a validated fallback.
 
 With the [private media runtime](../../../../../tools/linux/media-runtime/README.md),
 the main player defaults to `hwdec=auto`. mpv chooses a usable backend and retains
-its normal software fallback. This default is set before custom options, so an
-explicit `hwdec=no` or another supported mode still wins. Linux continues to skip
-`@nuvio-` profile metadata; it does not import Windows decoder/profile settings.
+its normal software fallback. An explicit `hwdec=no` or another supported mode
+can override this default in Replace/Full mode; Add preserves Nuvio's default.
+Linux reads `@nuvio-config-mode` but skips other `@nuvio-` profile metadata; it
+does not import Windows decoder/profile settings.
 The renderer requirements above remain enforced after custom options. Seek
 previews retain their independent `hwdec=no`, `vo=null` configuration.
 
@@ -136,11 +137,18 @@ Detailed HTTP status/log classification, video/HDR metadata and the production
 profile/event system are deferred. Generic mpv error messages reach the existing
 error callback; this does not promise full upstream stream-recovery semantics.
 
-Shared `extraMpvOptions` are passed through, including unwrapped `@nuvio-user:`
-entries; other `@nuvio-` profile metadata is ignored. Invalid optional options and
-runtime properties are diagnosed to stderr without aborting playback. Embedding,
-autoplay, headers and source-audio options remain authoritative. External mpv
-configuration files are disabled for this spike. The Linux surface bypasses the
+Shared `extraMpvOptions` retain the existing configuration-mode contract. In Off,
+the shared controller omits custom entries. Add accepts custom options only when
+Nuvio has not already configured that key successfully; Replace lets custom
+values override matching preferences. In Full, the shared controller omits its
+preferences, and supplied application requirements remain authoritative. Linux
+retains `hwdec=auto` as its fallback even in Full, with explicit overrides allowed.
+Matching outer single/double quotes are removed from `@nuvio-user:` values, as on
+Windows; repeated custom keys use the last value. Other `@nuvio-` metadata is
+ignored. Invalid optional options and runtime properties are diagnosed to stderr
+without aborting playback. Embedding, autoplay, headers and source-audio options
+remain authoritative in every mode. External mpv configuration files remain
+disabled; Full does not import a filesystem `mpv.conf`. The Linux surface bypasses the
 advanced desktop HDR/RTX/anime/SVP profile pass and SVP startup handshake. Windows
 and macOS keep their existing paths.
 

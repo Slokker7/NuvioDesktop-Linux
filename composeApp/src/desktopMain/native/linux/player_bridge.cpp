@@ -22,6 +22,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -435,6 +436,41 @@ void option(mpv_handle *mpv, const char *name, const std::string &value) {
     checkMpv(mpv_set_option_string(mpv, name, value.c_str()), name);
 }
 
+void applyExtraMpvOptions(mpv_handle *mpv, const std::vector<std::string> &options) {
+    const std::string modePrefix = "@nuvio-config-mode=";
+    std::string mode = "off";
+    for (const auto &entry : options) {
+        if (entry.rfind(modePrefix, 0) == 0) mode = entry.substr(modePrefix.size());
+    }
+    // Shared Kotlin omits custom entries in Off and application preferences in Full.
+    // Keep Linux's safe-auto fallback in Full, but allow an explicit hwdec override.
+    std::unordered_set<std::string> configured;
+    if (mode != "full") configured.insert("hwdec");
+    for (std::string entry : options) {
+        const bool userOption = entry.rfind("@nuvio-user:", 0) == 0;
+        if (userOption) entry.erase(0, 12);
+        if (entry.rfind("@nuvio-", 0) == 0) continue;
+        auto equals = entry.find('=');
+        if (equals == std::string::npos || equals == 0) continue;
+        const std::string name = entry.substr(0, equals);
+        std::string value = entry.substr(equals + 1);
+        if (userOption && value.size() >= 2 && value.front() == value.back() &&
+            (value.front() == '"' || value.front() == '\'')) {
+            // As on Windows, the custom box accepts quoted mpv.conf values, while
+            // mpv_set_option_string does not remove their surrounding quotes.
+            value = value.substr(1, value.size() - 2);
+        }
+        if (userOption && (mode == "add" || mode == "full") && configured.count(name)) continue;
+        int result = mpv_set_option_string(mpv, name.c_str(), value.c_str());
+        if (result < 0) {
+            std::fprintf(stderr, "Linux mpv option %s: %s\n", name.c_str(), mpv_error_string(result));
+        } else if (!userOption) {
+            // Failed options reserve nothing; repeated custom values remain last-wins.
+            configured.insert(name);
+        }
+    }
+}
+
 void headerOptions(mpv_handle *mpv, std::vector<std::string> &headers) {
     if (headers.empty()) return;
     // Use the native string array so commas in individual header values stay in one header.
@@ -643,17 +679,9 @@ JNI_METHOD(jlong, create)(
         player->mpv = mpv_create();
         if (!player->mpv) throw std::runtime_error("mpv_create failed.");
 
-        // Vendor-neutral default; explicit user options below retain precedence.
+        // Vendor-neutral default; Replace/Full and unmarked options can override it.
         option(player->mpv, "hwdec", "auto");
-        for (std::string entry : strings(env, extraMpvOptions)) {
-            if (entry.rfind("@nuvio-user:", 0) == 0) entry.erase(0, 12);
-            if (entry.rfind("@nuvio-", 0) == 0) continue; // Profile metadata, not mpv options.
-            auto equals = entry.find('=');
-            if (equals == std::string::npos) continue;
-            std::string name = entry.substr(0, equals);
-            int result = mpv_set_option_string(player->mpv, name.c_str(), entry.substr(equals + 1).c_str());
-            if (result < 0) std::fprintf(stderr, "Linux mpv option %s: %s\n", name.c_str(), mpv_error_string(result));
-        }
+        applyExtraMpvOptions(player->mpv, strings(env, extraMpvOptions));
         // These embedding/lifecycle boundaries must win over saved desktop options.
         option(player->mpv, "config", "no");
         option(player->mpv, "terminal", "no");

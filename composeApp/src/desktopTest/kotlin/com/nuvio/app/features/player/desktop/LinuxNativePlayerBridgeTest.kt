@@ -37,6 +37,206 @@ class LinuxNativePlayerBridgeTest {
         System.getProperty("nuvio.linux.nativeSmokeTest") == "true"
 
     @Test
+    fun customMpvOptionsRespectModesAndQuotedValues() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-config-options-")
+        val source = directory.resolve("video.y4m")
+        val report = directory.resolve("options.json")
+        val host = NativePlayerHost()
+        var frame: Frame? = null
+        var handle = 0L
+        try {
+            val script = writeMpvConfigObserver(directory, report)
+            writeLocalVideo(source)
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            for (mode in listOf("add", "replace", "full")) {
+                Files.deleteIfExists(report)
+                handle = create(drawable, source.toString(), extraMpvOptions = arrayOf(
+                    "scripts=$script", "osd-level=1", "osd-font-size=invalid",
+                    "@nuvio-user:osd-level=3", "@nuvio-user:osd-font-size='28.5'",
+                    "@nuvio-user:osd-duration=1300", "@nuvio-user:osd-duration=1400",
+                    "@nuvio-user:force-media-title=\"Quoted = title\"",
+                    "@nuvio-user:hwdec=\"no\"", "@nuvio-low-vram=on",
+                    "@nuvio-user:@nuvio-unknown=yes", "malformed", "=missing-name",
+                    // The mode applies to the whole list, independent of marker position.
+                    "@nuvio-config-mode=$mode",
+                ))
+                await { Files.exists(report) }
+                val values = Json.parseToJsonElement(Files.readString(report)).jsonObject
+                assertEquals(if (mode == "replace") "3" else "1",
+                    values.getValue("level").jsonPrimitive.content, mode)
+                // A rejected Nuvio option must not block a valid custom value in Add/Full.
+                assertEquals(28.5, values.getValue("fontSize").jsonPrimitive.double, mode)
+                // Accepted custom options do not become Nuvio-owned: last custom value wins.
+                assertEquals("1400", values.getValue("duration").jsonPrimitive.content, mode)
+                assertEquals("Quoted = title", values.getValue("title").jsonPrimitive.content, mode)
+                assertEquals(if (mode == "add") "auto" else "no",
+                    values.getValue("hwdec").jsonPrimitive.content, mode)
+                NativePlayerBridge.dispose(handle)
+                handle = 0L
+            }
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun customMpvModesPreserveEmbeddingAndPlaybackRequirements() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-config-embedding-")
+        val source = directory.resolve("video.y4m")
+        val report = directory.resolve("options.json")
+        val host = NativePlayerHost()
+        var frame: Frame? = null
+        var handle = 0L
+        try {
+            val script = writeMpvConfigObserver(directory, report)
+            writeLocalVideo(source)
+            var drawable = 0L
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+            }
+            for (mode in listOf("add", "replace", "full")) {
+                Files.deleteIfExists(report)
+                handle = create(drawable, source.toString(), extraMpvOptions = arrayOf(
+                    "scripts=$script", "@nuvio-config-mode=$mode",
+                    "@nuvio-user:config=yes", "@nuvio-user:osc=yes",
+                    "@nuvio-user:vo=null", "@nuvio-user:gpu-api=opengl",
+                    "@nuvio-user:gpu-context=x11egl", "@nuvio-user:wid=0",
+                    "@nuvio-user:keep-open=no", "@nuvio-user:idle=no",
+                    "@nuvio-user:input-vo-keyboard=yes", "@nuvio-user:pause=no",
+                    "@nuvio-user:start=0", "@nuvio-user:http-header-fields=wrong",
+                ))
+                await { Files.exists(report) }
+                val values = Json.parseToJsonElement(Files.readString(report)).jsonObject
+                val expected = mapOf("config" to "no", "osc" to "no", "vo" to "gpu-next",
+                    "api" to "vulkan", "context" to "x11vk", "wid" to drawable.toString(),
+                    "keepOpen" to "yes", "idle" to "yes", "keyboard" to "no", "pause" to "yes")
+                expected.forEach { (name, value) ->
+                    assertEquals(value, values.getValue(name).jsonPrimitive.content, "$mode: $name")
+                }
+                assertEquals(listOf("X-Nuvio-Test: value, with commas"),
+                    values.getValue("headers").jsonArray.map { it.jsonPrimitive.content })
+                await { NativePlayerBridge.positionMs(handle) >= 900L }
+                NativePlayerBridge.setPaused(handle, false)
+                await { NativePlayerBridge.positionMs(handle) > 1200L }
+                NativePlayerBridge.dispose(handle)
+                handle = 0L
+            }
+        } finally {
+            if (handle != 0L) NativePlayerBridge.dispose(handle)
+            SwingUtilities.invokeAndWait { frame?.dispose() }
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun controllerConfigModeChangesApplyBeforeLoadAndDoNotLeakAcrossSources() {
+        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        val directory = Files.createTempDirectory("nuvio-linux-config-controller-")
+        val source = directory.resolve("video.y4m")
+        val replacement = directory.resolve("replacement.y4m")
+        val report = directory.resolve("options.json")
+        val settings = com.nuvio.app.features.player.PlayerSettingsRepository
+        val previous = settings.uiState.value
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val error = AtomicReference<String?>(null)
+        var frame: Frame? = null
+        try {
+            val script = writeMpvConfigObserver(directory, report)
+            writeLocalVideo(source)
+            writeLocalVideo(replacement, firstLuma = 96)
+            previous.desktopMpvPropertyOverrides.keys.forEach { settings.setDesktopMpvPropertyOverride(it, null) }
+            mapOf("scripts" to script.toString(), "ao" to "null", "osd-level" to "2",
+                "osd-duration" to "2300").forEach { (key, value) ->
+                settings.setDesktopMpvPropertyOverride(key, value)
+            }
+            settings.setDesktopCustomMpvOptions("""
+                # Actual settings -> shared option builder -> JNI -> mpv.
+                scripts=$script
+                ao=null
+                osd-level=3
+                osd-font-size='31.5'
+                malformed
+                =missing-name
+            """.trimIndent())
+            SwingUtilities.invokeAndWait { frame = videoFrame(host) }
+            val modes = com.nuvio.app.features.player.DesktopMpvConfigMode.entries
+            for ((index, mode) in (modes + modes.first()).withIndex()) {
+                Files.deleteIfExists(report)
+                settings.setDesktopMpvConfigMode(mode)
+                val loaded = CountDownLatch(1)
+                SwingUtilities.invokeAndWait {
+                    controller.setControlCallbacks({ false }, { type, _ ->
+                        if (type == "fileLoaded") loaded.countDown()
+                        false
+                    }, { false }, { false })
+                    attachLocalVideo(controller, if (index % 2 == 0) source else replacement,
+                        error, enableUserMpvOptions = true)
+                }
+                assertTrue(loaded.await(20, TimeUnit.SECONDS), "$mode: ${error.get()}")
+                await { Files.exists(report) }
+                val values = Json.parseToJsonElement(Files.readString(report)).jsonObject
+                assertEquals(if (mode.name in listOf("Off", "Add")) "2" else "3",
+                    values.getValue("level").jsonPrimitive.content, mode.name)
+                if (mode.name == "Off") {
+                    assertEquals(values.getValue("defaultFontSize").jsonPrimitive.double,
+                        values.getValue("fontSize").jsonPrimitive.double)
+                } else assertEquals(31.5, values.getValue("fontSize").jsonPrimitive.double, mode.name)
+                assertEquals(if (mode.name == "Full")
+                    values.getValue("defaultDuration").jsonPrimitive.content else "2300",
+                    values.getValue("duration").jsonPrimitive.content, mode.name)
+                // Full still keeps the established Linux safe-auto fallback when unspecified.
+                assertEquals("auto", values.getValue("hwdec").jsonPrimitive.content, mode.name)
+            }
+            assertEquals(null, error.get())
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            settings.uiState.value.desktopMpvPropertyOverrides.keys.forEach {
+                settings.setDesktopMpvPropertyOverride(it, null)
+            }
+            previous.desktopMpvPropertyOverrides.forEach { (key, value) ->
+                settings.setDesktopMpvPropertyOverride(key, value)
+            }
+            settings.setDesktopCustomMpvOptions(previous.desktopCustomMpvOptions)
+            settings.setDesktopMpvConfigMode(previous.desktopMpvConfigMode)
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    private fun writeMpvConfigObserver(directory: Path, report: Path): Path =
+        directory.resolve("config-options.lua").also { script ->
+            Files.writeString(script, """
+                local utils = require 'mp.utils'
+                mp.register_event('file-loaded', function()
+                    local report = ${Json.encodeToString(report.toString())}
+                    local values = {}
+                    for key, property in pairs({level='osd-level', fontSize='osd-font-size',
+                        duration='osd-duration', title='force-media-title', hwdec='hwdec',
+                        config='config', osc='osc', vo='vo', api='gpu-api', context='gpu-context',
+                        wid='wid', keepOpen='keep-open', idle='idle', keyboard='input-vo-keyboard', pause='pause'}) do
+                        values[key] = mp.get_property(property)
+                    end
+                    values.headers = mp.get_property_native('http-header-fields')
+                    values.defaultDuration = mp.get_property_native('option-info/osd-duration/default-value')
+                    values.defaultFontSize = mp.get_property_native('option-info/osd-font-size/default-value')
+                    local file = assert(io.open(report .. '.new', 'w'))
+                    file:write(utils.format_json(values))
+                    file:close()
+                    assert(os.rename(report .. '.new', report))
+                end)
+            """.trimIndent())
+        }
+
+    @Test
     fun realChaptersPreserveSchemaPrecisionAndTitlesAndQueriesCanRaceClose() {
         if (!enabled() || GraphicsEnvironment.isHeadless()) return
         val directory = Files.createTempDirectory("nuvio-linux-chapters-")
