@@ -1,0 +1,93 @@
+From 89b95243ef1590ae06d17c2e3deeb1d82098a941 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Sat, 23 May 2026 10:43:55 -0700
+Subject: [PATCH] hwdec_cuda: fix partial failure edge cases in error paths
+
+The slopbot spam did find valid issues in the error paths in this code, and as
+part of verifying them, I have additional fixes.
+
+* ensure that the return value -1 from `cuda_init()` if `ext_init()` fails
+* zero alloc the `ext_vk` and `ext_gl` structs so that we have a known initial
+  state
+* explicitly initialise the `sem_handle.fd` to -1 to ensure we don't
+  accidentally close stdin in the error path. But also don't do this on
+  windows as an invalid Handle is 0.
+* Don't do a double `cuCtxPopCurrent()` in the `ext_gl` init failure path
+
+Fixes #17976, #17988, #17989
+---
+ video/out/hwdec/hwdec_cuda.c    | 4 +++-
+ video/out/hwdec/hwdec_cuda_gl.c | 4 +---
+ video/out/hwdec/hwdec_cuda_vk.c | 9 ++++++++-
+ 3 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/video/out/hwdec/hwdec_cuda.c b/video/out/hwdec/hwdec_cuda.c
+index 14289468ba527..49fbe7968c3a3 100644
+--- a/video/out/hwdec/hwdec_cuda.c
++++ b/video/out/hwdec/hwdec_cuda.c
+@@ -193,8 +193,10 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
+         return ret;
+ 
+     for (int n = 0; n < desc.num_planes; n++) {
+-        if (!p_owner->ext_init(mapper, desc.planes[n], n))
++        if (!p_owner->ext_init(mapper, desc.planes[n], n)) {
++            ret = -1;
+             goto error;
++        }
+     }
+ 
+  error:
+diff --git a/video/out/hwdec/hwdec_cuda_gl.c b/video/out/hwdec/hwdec_cuda_gl.c
+index 4c2535232fa3f..e5aa587bc0d14 100644
+--- a/video/out/hwdec/hwdec_cuda_gl.c
++++ b/video/out/hwdec/hwdec_cuda_gl.c
+@@ -39,9 +39,8 @@ static bool cuda_ext_gl_init(struct ra_hwdec_mapper *mapper,
+     struct cuda_mapper_priv *p = mapper->priv;
+     CudaFunctions *cu = p_owner->cu;
+     int ret = 0;
+-    CUcontext dummy;
+ 
+-    struct ext_gl *egl = talloc_ptrtype(NULL, egl);
++    struct ext_gl *egl = talloc_zero_ptrtype(NULL, egl);
+     p->ext[n] = egl;
+ 
+     struct ra_tex_params params = {
+@@ -84,7 +83,6 @@ static bool cuda_ext_gl_init(struct ra_hwdec_mapper *mapper,
+     return true;
+ 
+ error:
+-    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+     return false;
+ }
+ 
+diff --git a/video/out/hwdec/hwdec_cuda_vk.c b/video/out/hwdec/hwdec_cuda_vk.c
+index e744ff628a6b6..9b80c69998649 100644
+--- a/video/out/hwdec/hwdec_cuda_vk.c
++++ b/video/out/hwdec/hwdec_cuda_vk.c
+@@ -55,9 +55,14 @@ static bool cuda_ext_vk_init(struct ra_hwdec_mapper *mapper,
+     int mem_fd = -1;
+     int ret = 0;
+ 
+-    struct ext_vk *evk = talloc_ptrtype(NULL, evk);
++    struct ext_vk *evk = talloc_zero_ptrtype(NULL, evk);
+     p->ext[n] = evk;
+ 
++#if !HAVE_WIN32_DESKTOP
++    // need to initialise fd as invalid; zero alloc covers the Win32 .handle
++    evk->sem_handle.fd = -1;
++#endif
++
+     pl_gpu gpu = ra_pl_get(mapper->ra);
+ 
+     struct pl_tex_params tex_params = {
+@@ -163,8 +168,10 @@ static bool cuda_ext_vk_init(struct ra_hwdec_mapper *mapper,
+     ret = CHECK_CU(cu->cuImportExternalSemaphore(&evk->cuda_sem, &w_desc));
+     if (ret < 0)
+         goto error;
++#if !HAVE_WIN32_DESKTOP
+     // CUDA takes ownership of an imported FD *but not* an imported Handle.
+     evk->sem_handle.fd = -1;
++#endif
+ 
+     return true;
+ 

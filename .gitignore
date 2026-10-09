@@ -49,6 +49,7 @@ tools
 /tools/linux/media-runtime/tests/*
 !/tools/linux/media-runtime/tests/*.py
 !/tools/linux/media-runtime/tests/*.lua
+!/tools/linux/media-runtime/tests/cuda-mapper-failure.c
 !/tools/linux/media-runtime/tests/vectors.json
 /app/
 

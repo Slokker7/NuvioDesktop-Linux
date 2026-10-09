@@ -153,7 +153,7 @@ def main():
         args.log_dir.mkdir(parents=True, exist_ok=True)
     root = args.runtime.resolve(strict=True)
     records = declared()
-    mpv = [r for r in records if r['component'] == 'mpv']
+    mpv = [r for r in records if r['component'] == 'mpv' and r['upstream_commit'] == COMMIT]
     if len(mpv) != 1 or mpv[0]['version'] != '0.41.0' or mpv[0]['upstream_commit'] != COMMIT:
         raise ValueError('Missing/wrong mpv safety backport')
     verify(root, args.source_dir)

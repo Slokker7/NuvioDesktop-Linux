@@ -69,8 +69,8 @@ References: [Ubuntu release lifecycle](https://ubuntu.com/about/release-cycle),
 ## Manifest and feature policy
 
 `manifest.json` is canonical. It records immutable archives and verified SHA-256s,
-licenses, classifications, reasons, options and patch lists. mpv 0.41.0 has one
-upstream safety-policy backport, described below; all dependency pins are unchanged.
+licenses, classifications, reasons, options and patch lists. mpv 0.41.0 has two
+upstream backports, described below; all dependency pins are unchanged.
 FFmpeg's detached signature is verified with a pinned key fingerprint;
 other archives are hash-verified official release/tag material. libdisplay-info's
 original release archive is obtained from Debian's official source mirror.
@@ -219,6 +219,43 @@ and software EOF. Each negative must reject actual Vulkan candidate consideratio
 and demonstrate failed device creation before any `Trying` event. Omitting the
 optional unpatched runtime is explicitly reported as `NOT REQUESTED`; ordinary
 CI needs no GPU or second mpv build. Displayed tests run separately.
+
+### Upstream CUDA mapper failure backport
+
+The second patch, `patches/mpv-0.41-cuda-mapper-failure.patch`, is the complete,
+unadapted upstream commit
+[`89b95243ef1590ae06d17c2e3deeb1d82098a941`](https://github.com/mpv-player/mpv/commit/89b95243ef1590ae06d17c2e3deeb1d82098a941),
+including its author/message. It follows the safe-selection patch in manifest
+order. Patch and before/after hashes cover all three modified CUDA source files.
+
+Failure of CUDA `ext_init` now makes `mapper_init` return failure, so the existing
+mapper owner destroys partial state and returns NULL instead of exposing an
+invalid mapper to frame mapping. The backport also zero-initializes GL/Vulkan
+interop state, initializes Unix semaphore FDs to -1, preserves imported FD
+ownership and removes the extra GL failure-path context pop. GL remains disabled
+in this recipe; its upstream fix is retained in the verified source. This fixes
+error propagation, not VRAM exhaustion, and changes no hwdec or renderer policy.
+Mapper rejection does not guarantee a decoder switch: a transient failure can
+recover on a later frame, while persistent failure can keep dropping frames.
+
+Every build runs `tests/test-cuda-mapper.py` after compiling mpv. It compiles the
+actual pinned mapper and mapper-creation implementation with test-only device
+stubs, the build's compiler flags and allocator objects. Success and failure at
+each of three planes check returned ownership, partial cleanup and balanced
+CUDA context operations, without requiring a GPU or real OOM. A pre-backport
+build must demonstrate the inverse result with `--expect-broken`. No injection
+hook or helper is shipped in the runtime. Inside the corresponding builder:
+
+```sh
+python3 /recipes/tests/test-cuda-mapper.py /work/build/mpv --output /work/logs/cuda-mapper.json
+# Read-only older build, with writable output outside it:
+python3 /recipes/tests/test-cuda-mapper.py /work/build/mpv --expect-broken --output /tmp/cuda-negative.json
+```
+
+Use `build.sh --work-dir build/linux-cuda-failure-fix` for a separate candidate;
+keep the validated runtime untouched for A/B testing. The existing fresh-build
+policy rebuilds unchanged dependency pins rather than reusing mutable component
+trees. This backport does not implement shader policy or complete G07/G08.
 
 ## Runtime structure and linkage
 

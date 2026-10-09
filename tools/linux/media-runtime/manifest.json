@@ -466,6 +466,27 @@
               "after_sha256": "7fba7ae2323f2d8af5153eac1cf88ed3721039e3c031a9646a30e23f3280186a"
             }
           }
+        },
+        {
+          "file": "patches/mpv-0.41-cuda-mapper-failure.patch",
+          "sha256": "d6d3f58ff1d0e73f00a815db4c9c80f4201b3380537892a268c3db54abf82e98",
+          "upstream_commit": "89b95243ef1590ae06d17c2e3deeb1d82098a941",
+          "upstream_url": "https://github.com/mpv-player/mpv/commit/89b95243ef1590ae06d17c2e3deeb1d82098a941",
+          "reason": "Complete upstream CUDA interop error-path fix: reject partial mapper initialization and safely initialize/clean up external GL/Vulkan resources. No decoder-selection policy change.",
+          "source_files": {
+            "video/out/hwdec/hwdec_cuda.c": {
+              "before_sha256": "5d460d7d99ecbb2484ce401fb2f134c581031eded05a577caea7f30d0a0ce0de",
+              "after_sha256": "8a9555e957e896e6229055b4585d6a76d8c1cdddd468badc1d4285c1da67efe4"
+            },
+            "video/out/hwdec/hwdec_cuda_gl.c": {
+              "before_sha256": "d305cc378f02dbf02b891897eb3025c6b31e7a70119f19e3fa8ddf578d9add3e",
+              "after_sha256": "a3a6df41f8f287228fc08f4a8da5d565ce1f531016e105d787e5f1635934be0a"
+            },
+            "video/out/hwdec/hwdec_cuda_vk.c": {
+              "before_sha256": "f06a6f0e914bccb6bc5998f4ddcda0fde41b6df2d3b9a6c311a187a9d3a9574b",
+              "after_sha256": "28383970ce3c408e14f34842817fc362d72db79772e5ac44f008a56c98b8b972"
+            }
+          }
         }
       ],
       "runtime_libraries": [

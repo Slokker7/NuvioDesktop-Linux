@@ -136,6 +136,7 @@ mapfile -t opts < <(source_options libXpresent)
 run_component libXpresent autoconf_build libXpresent "${opts[@]}"
 mapfile -t opts < <(source_options mpv)
 run_component mpv meson_build mpv "${opts[@]}"
+python3 /recipes/tests/test-cuda-mapper.py /work/build/mpv --output /work/logs/cuda-mapper.json
 # Export a deliberately small runtime; no compiler, driver, static archives,
 # libtool files, CMake exports or build-time registry/code generators.
 runtime=/work/runtime
