@@ -121,6 +121,7 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
     GCancellable *evaluation = nullptr;
     guint timer = 0;
     bool ready = false;
+    double controlsUiScaleFactor = 1.0; // Transient; the shared snapshot owns the preference.
     bool hostWindowFocused = false; // GTK thread only; start hidden until AWT supplies focus.
     int x = 0, y = 0, width = 0, height = 0, lastScale = 0;
     Message message;
@@ -197,6 +198,9 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
                 self.ready = true;
                 self.deliver();
                 self.syncPlayback();
+            } else if (name == "setControlsUiScalePercent") {
+                self.controlsUiScaleFactor = std::clamp(1.0 + number / 100.0, 0.5, 1.5);
+                self.applyControlsZoom();
             } else if (self.message) self.message(name, number);
         } catch (const std::exception &error) {
             std::fprintf(stderr, "Linux controls message failure: %s\n", error.what());
@@ -218,8 +222,19 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
         return true;
     }
 
+    void applyControlsZoom() { // GTK thread only, including script-message callbacks.
+        if (closing || !window || !view) return;
+        // Match Windows/macOS's 2x physical baseline without changing overlay bounds.
+        // Absolute page zoom keeps WebKit layout and pointer coordinates in agreement.
+        const int scale = std::max(1, gtk_widget_get_scale_factor(window));
+        const double zoom = (2.0 / scale) * controlsUiScaleFactor;
+        if (std::abs(webkit_web_view_get_zoom_level(view) - zoom) > 0.001)
+            webkit_web_view_set_zoom_level(view, zoom);
+    }
+
     bool layout(bool force = false) {
         if (!window || !host || closing) return false;
+        applyControlsZoom(); // Refresh the baseline when GDK's monitor scale changes.
         XWindowAttributes attributes{};
         int rootX = 0, rootY = 0;
         if (!hostGeometry(attributes, rootX, rootY)) return false;

@@ -631,7 +631,17 @@ function updateViewportUiScale() {
   // receives a 0.5 HUD, matching the authored 1920x1080 proportions.
   const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
   const viewportHeight = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
-  const proportionalScale = Math.min(viewportWidth / 1920, viewportHeight / 1080, 1);
+  // All desktop hosts normalize to a 2x physical baseline before applying user page zoom.
+  // Recover that baseline viewport for responsive sizing: zooming out otherwise enlarges
+  // the CSS viewport and autoScale, cancelling the user's requested shrink. Read actual DPR
+  // rather than the requested percentage so an asynchronous native zoom cannot double-scale
+  // a frame. Keep the live CSS viewport below for overflow/compactness decisions.
+  const referenceViewportScale = (window.devicePixelRatio || 2) / 2;
+  const proportionalScale = Math.min(
+    viewportWidth * referenceViewportScale / 1920,
+    viewportHeight * referenceViewportScale / 1080,
+    1,
+  );
   // Below this, further shrinking would make targets unreadable. Compactness tiers remove controls
   // instead while preserving play/pause and the timeline. The floor is the full-screen 1080p size
   // in Windows DIPs, not raw pixels: because the zoom normalizes DPI away, a fixed 0.5 let a

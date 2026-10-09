@@ -99,6 +99,13 @@ hides the overlay; a vanished Canvas stops the timer and destroys it on GTK.
 Mouse clicks focus the WebView; its existing JavaScript owns keyboard messages.
 No WM-managed independent desktop window or native Wayland surface is created.
 
+Linux applies `desktopUiScalePercent` live through native WebKit page zoom,
+using the same 2x physical baseline as Windows/macOS and the shared -50..+50%
+user multiplier. Shared settings reapply the saved scale when the player is
+recreated. Bottom control-icon scale remains a separate CSS multiplier.
+Shared responsive sizing uses the viewport at the native baseline, so zooming
+out cannot enlarge the CSS controls and cancel the requested reduction.
+
 The supplied `controlsPageUrl` loads unchanged; file URLs can read local sibling
 assets. The registered `player` script handler uses WebKit's JSC object/property
 API, validates the action string and finite numeric value, and handles
