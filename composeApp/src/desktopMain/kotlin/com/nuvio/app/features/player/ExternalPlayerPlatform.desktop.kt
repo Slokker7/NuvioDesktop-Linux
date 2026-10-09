@@ -48,6 +48,8 @@ private class DesktopPlayerDefinition(
 internal actual object ExternalPlayerPlatform {
     private const val systemPlayerId = "system"
     private val isWindows = System.getProperty("os.name").orEmpty().lowercase(Locale.ROOT).contains("win")
+    private val isLinux = System.getProperty("os.name").orEmpty().lowercase(Locale.ROOT).contains("linux")
+    private val linuxDiscovery = LinuxExternalPlayerDiscovery()
     private val customPlayerStore = DesktopStorage.store("nuvio_external_players")
 
     private val definitions: List<DesktopPlayerDefinition> = listOf(
@@ -213,7 +215,7 @@ internal actual object ExternalPlayerPlatform {
             },
             sourceArgs = { source -> listOf("--path=$source") },
         ),
-    )
+    ).filter { !isLinux || LinuxExternalPlayerDiscovery.supports(it.id) }
 
     /** Resolved only when a specific player is needed; startup no longer scans every player. */
     private val resolvedPaths = mutableMapOf<String, String?>()
@@ -221,7 +223,12 @@ internal actual object ExternalPlayerPlatform {
         if (isWindows) detectWindowsDefaultMediaAssociation() else null
     }
 
-    private fun resolvedPath(def: DesktopPlayerDefinition): String? = synchronized(resolvedPaths) {
+    private fun linuxTarget(def: DesktopPlayerDefinition): LinuxExternalPlayerTarget? =
+        linuxDiscovery.resolve(def.id, customPlayerStore.getString(customPlayerPathKey(def.id)))
+
+    private fun resolvedPath(def: DesktopPlayerDefinition): String? = if (isLinux) {
+        linuxTarget(def)?.displayPath
+    } else synchronized(resolvedPaths) {
         if (resolvedPaths.containsKey(def.id)) return@synchronized resolvedPaths[def.id]
         val customPath = customPlayerStore
             .getString(customPlayerPathKey(def.id))
@@ -307,6 +314,16 @@ internal actual object ExternalPlayerPlatform {
         request: ExternalPlayerPlaybackRequest,
         playerId: String?,
     ): ExternalPlayerOpenResult {
+        val platformRequest = if (isLinux) linuxExternalPlayerRequest(request)
+            ?: return ExternalPlayerOpenResult.Failed else request
+        // A saved Windows-only identity stays saved, but must not launch an unrelated player.
+        if (isLinux && playerId != null && playerId != systemPlayerId && definitions.none { it.id == playerId }) {
+            return ExternalPlayerOpenResult.NoPlayerAvailable
+        }
+        return openDesktop(platformRequest, playerId)
+    }
+
+    private fun openDesktop(request: ExternalPlayerPlaybackRequest, playerId: String?): ExternalPlayerOpenResult {
         val sourceSummary = externalPlayerSourceSummary(request.sourceUrl)
         val effectiveId = playerId?.takeIf { id ->
             id == systemPlayerId || definitions.any { it.id == id }
@@ -349,6 +366,15 @@ internal actual object ExternalPlayerPlatform {
             externalPlayerLog.w { "External playback rejected: unknown player id=$effectiveId" }
             return ExternalPlayerOpenResult.Failed
         }
+        if (isLinux) {
+            val target = linuxTarget(def) ?: return ExternalPlayerOpenResult.NoPlayerAvailable
+            val command = linuxLaunchCommand(def.id, target, request) ?: return ExternalPlayerOpenResult.Failed
+            return if (launchDetached(command, "player=$effectiveId source=$sourceSummary")) {
+                ExternalPlayerOpenResult.Opened
+            } else {
+                ExternalPlayerOpenResult.Failed
+            }
+        }
         val exePath = resolvedPath(def) ?: run {
             externalPlayerLog.w { "External playback unavailable: no executable for player=$effectiveId" }
             return ExternalPlayerOpenResult.NoPlayerAvailable
@@ -368,6 +394,28 @@ internal actual object ExternalPlayerPlatform {
         ) ExternalPlayerOpenResult.Opened else ExternalPlayerOpenResult.Failed
     }
 
+    /** Reuse upstream CLI mappings; Linux adds native source decoding and mpv's option terminator. */
+    internal fun linuxLaunchCommand(
+        playerId: String,
+        target: LinuxExternalPlayerTarget,
+        request: ExternalPlayerPlaybackRequest,
+    ): List<String>? {
+        if (!LinuxExternalPlayerDiscovery.supports(playerId)) return null
+        val def = definitions.firstOrNull { it.id == playerId } ?: return null
+        val normalized = linuxExternalPlayerRequest(request) ?: return null
+        return buildList {
+            addAll(target.commandPrefix(normalized))
+            addAll(def.buildArgs(normalized).flatMap { argument ->
+                // Linux mpv preserves literal header values through the list append action.
+                if (playerId == "mpv" && argument.startsWith("--http-header-fields=")) {
+                    linuxMpvHeaderArguments(normalized.sourceHeaders)
+                } else listOf(argument)
+            })
+            if (playerId == "mpv") add("--")
+            addAll(def.sourceArgs(linuxExternalPlayerSourceArgument(normalized.sourceUrl)))
+        }
+    }
+
     /**
      * Starts a child process without keeping its stdio pipes attached. This is essential: with the
      * default [ProcessBuilder] behaviour the child's stdout/stderr are piped to us, and because we
@@ -385,6 +433,7 @@ internal actual object ExternalPlayerPlatform {
             "Starting external process $diagnosticContext executable=$executable argumentCount=${(command.size - 1).coerceAtLeast(0)}"
         }
         return runCatching {
+            if (isLinux) return@runCatching startLinuxExternalPlayerProcess(command)
             ProcessBuilder(command)
                 // Run from the player's own folder. Inheriting ours pins Nuvio's install
                 // directory for as long as the player stays open, which blocks updates.
@@ -490,7 +539,9 @@ internal actual object ExternalPlayerPlatform {
                 }
             }
             if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
-                val selected = chooser.selectedFile?.takeIf(File::isLaunchableFile)
+                val selected = chooser.selectedFile?.takeIf { file ->
+                    if (isLinux) isLinuxPlayerExecutable(file) else file.isLaunchableFile()
+                }
                 val valid = selected != null && (
                     !isWindows || def.executableNames.any { it.equals(selected.name, ignoreCase = true) }
                 )
@@ -631,6 +682,10 @@ internal actual object ExternalPlayerPlatform {
     }
 
     private fun openWithPlatformCommand(rawUri: String, sourceSummary: String): Boolean {
+        if (isLinux) {
+            val command = linuxSystemPlayerCommand(rawUri, linuxDiscovery) ?: return false
+            return launchDetached(command, "player=system-handler source=$sourceSummary")
+        }
         val osName = System.getProperty("os.name").orEmpty().lowercase(Locale.ROOT)
         val command = when {
             osName.contains("mac") -> listOf("open", rawUri)
