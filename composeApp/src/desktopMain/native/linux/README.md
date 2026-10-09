@@ -31,7 +31,7 @@ the main player defaults to `hwdec=auto`. mpv chooses a usable backend and retai
 its normal software fallback. An explicit `hwdec=no` or another supported mode
 can override this default in Replace/Full mode; Add preserves Nuvio's default.
 Linux reads `@nuvio-config-mode` but skips other `@nuvio-` profile metadata; it
-does not import Windows decoder/profile settings.
+does not import Windows-only decoder or advanced enhancement settings.
 The renderer requirements above remain enforced after custom options. Seek
 previews retain their independent `hwdec=no`, `vo=null` configuration.
 
@@ -133,8 +133,9 @@ queues them onto Swing and rejects superseded generations. `playbackRestart` is
 necessary for the shared engine to publish real snapshots. EOF and buffering state
 are queried through properties/events. Disposal stops/wakes/joins the event thread,
 releases its global JNI reference, and calls `mpv_terminate_destroy`.
-Detailed HTTP status/log classification, video/HDR metadata and the production
-profile/event system are deferred. Generic mpv error messages reach the existing
+Decoded colour metadata also produces `videoParams`, solely to keep SDR colour
+presets off HDR/unknown sources. Detailed HTTP status/log classification and the
+advanced HDR/profile event system are deferred. Generic mpv error messages reach the existing
 error callback; this does not promise full upstream stream-recovery semantics.
 
 Shared `extraMpvOptions` retain the existing configuration-mode contract. In Off,
@@ -151,6 +152,49 @@ remain authoritative in every mode. External mpv configuration files remain
 disabled; Full does not import a filesystem `mpv.conf`. The Linux surface bypasses the
 advanced desktop HDR/RTX/anime/SVP profile pass and SVP startup handshake. Windows
 and macOS keep their existing paths.
+
+## Base configuration and picture presets
+
+Nuvio's video profiles are application-defined property bundles, not named mpv
+profiles or filesystem `mpv.conf` sections. Linux uses the shared Neutral,
+Cinematic, Vivid and Custom colour values on confirmed SDR sources. Unknown/HDR
+sources remain neutral, including when the saved HDR setting requests tonemapping:
+HDR output controls are not implemented by this base profile. Four equalizer
+properties (`contrast`, `brightness`, `saturation`, `gamma`) update live; Custom
+reset restores zero offsets without leaving Custom. Replace preserves matching
+custom properties during refresh; Full skips the application profile entirely.
+
+Before `mpv_initialize`, ordinary defaults follow the Windows `gpu-next` baseline:
+`spline36`/`lanczos`/`mitchell` scaling, antiring, sigmoid/correct downscaling,
+fruit/10-bit temporal dithering, debanding, streaming cache, `hr-seek=no` and
+`volume-max=200`. Remote sources also receive Windows' ordinary reconnect options
+(no retry-on-HTTP-error option). These are **defaults, all custom-overridable**,
+not additional integration requirements. Full omits them. macOS retains its own
+lighter OpenGL baseline; Windows-only decoder, DXGI low-VRAM detection, HDR, RTX,
+SVP and shader policies are not imported.
+
+Creation order is: safe `hwdec=auto` fallback and ordinary defaults; shared source
+and settings options (including the buffer preset and curated mpv menu); custom
+options according to Off/Add/Replace/Full; existing source title/speed requirements;
+then native embedding, playback-start, headers and source-audio requirements.
+Only then do initialization and `loadfile` run. After file loading, the Linux base
+profile applies colour and runtime buffer limits with the same custom-mode guard.
+`config=no`, `gpu-next`, Vulkan/x11vk and the host XID remain enforced as before.
+Initial options/custom mode are rebuilt on source creation; changing them requires
+reopening the source for the complete configuration to take effect.
+
+Linux buffer presets reuse the Windows limits: Metered 10/10 seconds, Low Data
+15/30, Balanced 60/120 and Resilient 180/600 (readahead/cache). Byte limits are
+32/8, 64/16, 256/64 and 1024/128 MiB (forward/back). The I/O ring stays at 1 MiB;
+only time limits and the 0.25-second startup threshold scale with playback speed.
+The shared Metered pause clamp and resume/seek release now use these Linux limits.
+Native creation without shared settings uses the Windows Resilient fallback.
+
+The existing profile-scoped settings store remains the sole persistence owner.
+Fresh installations default to Neutral/Balanced; existing buffer migration remains
+unchanged. Source replacement and Back/reopen rebuild initial options from saved
+settings and reapply colour after source classification. The temporary Metered
+pause clamp is not saved or carried into a replacement player.
 
 ## Seek previews
 

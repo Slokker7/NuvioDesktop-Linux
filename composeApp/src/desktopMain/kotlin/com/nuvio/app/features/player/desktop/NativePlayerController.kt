@@ -1731,7 +1731,9 @@ internal fun desktopBufferPresetMpvOptions(
     playbackSpeed: Float = 1f,
 ): List<Pair<String, String>> {
     val limits = when (hostOs) {
-        DesktopHostOs.WINDOWS -> when (preset) {
+        DesktopHostOs.WINDOWS,
+        DesktopHostOs.LINUX,
+        -> when (preset) {
             DesktopBufferPreset.Metered -> DesktopBufferLimits(10, 10, "32MiB", "8MiB")
             DesktopBufferPreset.LowData -> DesktopBufferLimits(15, 30, "64MiB", "16MiB")
             DesktopBufferPreset.Balanced -> DesktopBufferLimits(60, 120, "256MiB", "64MiB")
@@ -1744,7 +1746,6 @@ internal fun desktopBufferPresetMpvOptions(
             // Preserve the previous macOS defaults for existing installations.
             DesktopBufferPreset.Resilient -> DesktopBufferLimits(30, 30, "64MiB", "16MiB")
         }
-        DesktopHostOs.LINUX,
         DesktopHostOs.UNKNOWN,
         -> return emptyList()
     }

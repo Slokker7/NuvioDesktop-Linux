@@ -208,6 +208,7 @@ struct Player {
     std::atomic<bool> stopping{false};
     std::atomic<bool> fileReady{false};
     std::atomic<bool> ended{false};
+    int lastVideoHdr = -1; // Event thread only; never carried to a replacement player.
     bool playbackStarted = false; // Only accessed by the event thread.
     bool ownsX11Lifetime = false;
 
@@ -344,7 +345,11 @@ struct Player {
                 case MPV_EVENT_FILE_LOADED:
                     fileReady = true;
                     ended = false;
+                    reportVideoParams(env);
                     emit(env, "fileLoaded");
+                    break;
+                case MPV_EVENT_VIDEO_RECONFIG:
+                    reportVideoParams(env);
                     break;
                 case MPV_EVENT_PLAYBACK_RESTART:
                     playbackStarted = true;
@@ -370,6 +375,20 @@ struct Player {
             }
         }
         vm->DetachCurrentThread();
+    }
+
+    void reportVideoParams(JNIEnv *env) {
+        // Only classify the decoded source so SDR colour presets cannot grade HDR by mistake.
+        // This does not configure HDR output, tone mapping, filters or hardware decoding.
+        const std::string gamma = stringProperty("video-params/gamma");
+        const std::string primaries = stringProperty("video-params/primaries");
+        if (gamma.empty() || primaries.empty()) return; // Keep unknown sources neutral.
+        const int hdr = gamma == "st2084" || gamma == "hlg" || gamma == "arib-std-b67" ||
+            primaries == "bt.2020" || primaries == "bt.2020-cl";
+        if (hdr != lastVideoHdr) {
+            lastVideoHdr = hdr;
+            emit(env, "videoParams", hdr);
+        }
     }
 
     double number(const char *name, double unavailable = 0.0) {
@@ -436,7 +455,8 @@ void option(mpv_handle *mpv, const char *name, const std::string &value) {
     checkMpv(mpv_set_option_string(mpv, name, value.c_str()), name);
 }
 
-void applyExtraMpvOptions(mpv_handle *mpv, const std::vector<std::string> &options) {
+void applyExtraMpvOptions(mpv_handle *mpv, const std::vector<std::string> &options,
+                         const std::string &source) {
     const std::string modePrefix = "@nuvio-config-mode=";
     std::string mode = "off";
     for (const auto &entry : options) {
@@ -446,6 +466,37 @@ void applyExtraMpvOptions(mpv_handle *mpv, const std::vector<std::string> &optio
     // Keep Linux's safe-auto fallback in Full, but allow an explicit hwdec override.
     std::unordered_set<std::string> configured;
     if (mode != "full") configured.insert("hwdec");
+    auto apply = [&](const std::string &name, const std::string &value, bool owned) {
+        const int result = mpv_set_option_string(mpv, name.c_str(), value.c_str());
+        if (result < 0) {
+            std::fprintf(stderr, "Linux mpv option %s: %s\n", name.c_str(), mpv_error_string(result));
+        } else if (owned) {
+            configured.insert(name);
+        }
+    };
+    if (mode != "full") {
+        // Ordinary gpu-next/streaming defaults from the Windows desktop baseline. None are
+        // integration requirements: shared settings and Replace/Full remain authoritative.
+        const std::pair<const char *, const char *> defaults[] = {
+            {"scale", "spline36"}, {"cscale", "lanczos"}, {"dscale", "mitchell"},
+            {"scale-antiring", "0.7"}, {"cscale-antiring", "0.7"}, {"dscale-antiring", "0.7"},
+            {"sigmoid-upscaling", "yes"}, {"correct-downscaling", "yes"}, {"linear-downscaling", "no"},
+            {"dither", "fruit"}, {"dither-depth", "10"}, {"temporal-dither", "yes"},
+            {"temporal-dither-period", "1"}, {"deband", "yes"}, {"deband-iterations", "2"},
+            {"deband-threshold", "35"}, {"deband-range", "16"}, {"deband-grain", "0"},
+            // The application owns these four runtime properties; begin neutral until decoded
+            // colour metadata permits the shared SDR preset values to be applied.
+            {"contrast", "0"}, {"brightness", "0"}, {"saturation", "0"}, {"gamma", "0"},
+            {"cache", "yes"}, {"cache-pause", "yes"}, {"cache-pause-initial", "yes"},
+            {"cache-pause-wait", "0.25"}, {"cache-secs", "600"}, {"demuxer-readahead-secs", "180"},
+            {"demuxer-max-bytes", "1GiB"}, {"demuxer-max-back-bytes", "128MiB"},
+            {"stream-buffer-size", "1MiB"}, {"hr-seek", "no"}, {"volume-max", "200"},
+        };
+        for (const auto &entry : defaults) apply(entry.first, entry.second, true);
+        if (source.find("://") != std::string::npos && source.rfind("file://", 0) != 0) {
+            apply("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5", true);
+        }
+    }
     for (std::string entry : options) {
         const bool userOption = entry.rfind("@nuvio-user:", 0) == 0;
         if (userOption) entry.erase(0, 12);
@@ -461,13 +512,8 @@ void applyExtraMpvOptions(mpv_handle *mpv, const std::vector<std::string> &optio
             value = value.substr(1, value.size() - 2);
         }
         if (userOption && (mode == "add" || mode == "full") && configured.count(name)) continue;
-        int result = mpv_set_option_string(mpv, name.c_str(), value.c_str());
-        if (result < 0) {
-            std::fprintf(stderr, "Linux mpv option %s: %s\n", name.c_str(), mpv_error_string(result));
-        } else if (!userOption) {
-            // Failed options reserve nothing; repeated custom values remain last-wins.
-            configured.insert(name);
-        }
+        // Failed options reserve nothing; repeated custom values remain last-wins.
+        apply(name, value, !userOption);
     }
 }
 
@@ -681,7 +727,7 @@ JNI_METHOD(jlong, create)(
 
         // Vendor-neutral default; Replace/Full and unmarked options can override it.
         option(player->mpv, "hwdec", "auto");
-        applyExtraMpvOptions(player->mpv, strings(env, extraMpvOptions));
+        applyExtraMpvOptions(player->mpv, strings(env, extraMpvOptions), source);
         // These embedding/lifecycle boundaries must win over saved desktop options.
         option(player->mpv, "config", "no");
         option(player->mpv, "terminal", "no");

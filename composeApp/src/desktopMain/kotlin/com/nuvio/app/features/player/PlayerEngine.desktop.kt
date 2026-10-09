@@ -32,6 +32,7 @@ import com.nuvio.app.features.player.desktop.DesktopWindowGeometryDiagnostics
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerLaunchShield
 import com.nuvio.app.features.player.desktop.NativePlayerController
+import com.nuvio.app.features.player.desktop.applyLinuxBaseVideoProfile
 import com.nuvio.app.features.input.GamepadContext
 import com.nuvio.app.features.screensaver.DesktopScreensaver
 import com.nuvio.app.features.player.desktop.NativePlayerHost
@@ -863,9 +864,6 @@ private fun NativePlayerSurface(
     }
 
     LaunchedEffect(controller, playbackAttemptId, sourceUrl, isAnimeContent) {
-        // The Linux embedding spike uses libmpv's baseline picture. Advanced desktop profiles
-        // include Windows decoder/filter assumptions and are outside this milestone.
-        if (DesktopHostOs.current == DesktopHostOs.LINUX) return@LaunchedEffect
         // Apply the saved colour/HDR presets whenever they change or the file's HDR
         // state is (re)detected. Deliberately NOT gated on HDR detection: the colour
         // profile (and F8/F9 changes) must take effect even if the video-params event
@@ -890,6 +888,23 @@ private fun NativePlayerSurface(
             PlayerSettingsRepository.uiState,
         ) { videoState, settings -> videoState to settings }
             .collect { (videoState, settings) ->
+                if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+                    if (videoState.refreshToken > 0) {
+                        controller.applyLinuxBaseVideoProfile(settings, videoState.isHdr)
+                        controller.setPlaybackInfo(
+                            session = "$playbackAttemptId:${sourceUrl.hashCode()}",
+                            hdrLabel = null,
+                            svpActive = false,
+                            videoLabel = when {
+                                settings.desktopMpvConfigMode == DesktopMpvConfigMode.Full -> ""
+                                videoState.isHdr == false -> settings.desktopColorProfile.label
+                                else -> DesktopColorProfile.Neutral.label
+                            },
+                            shaderLabel = null,
+                        )
+                    }
+                    return@collect
+                }
                 // Native code owns hwdec/vf from FILE_LOADED until the initial VapourSynth graph
                 // has produced a real runtime-ready signal. Applying the ordinary profile in
                 // this interval can otherwise replace d3d11va-copy with d3d11va and clear vf,
