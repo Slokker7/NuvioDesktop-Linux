@@ -208,6 +208,8 @@ struct Player {
     std::atomic<bool> stopping{false};
     std::atomic<bool> fileReady{false};
     std::atomic<bool> ended{false};
+    int64_t lastShaderSize = -1;
+    std::string lastShaderMedia;
     int lastVideoHdr = -1; // Event thread only; never carried to a replacement player.
     bool playbackStarted = false; // Only accessed by the event thread.
     bool ownsX11Lifetime = false;
@@ -342,6 +344,13 @@ struct Player {
             mpv_event *event = mpv_wait_event(mpv, 0.2);
             if (stopping) break;
             switch (event->event_id) {
+                case MPV_EVENT_PROPERTY_CHANGE: {
+                    auto *property = static_cast<mpv_event_property *>(event->data);
+                    if (event->reply_userdata == 1 && property)
+                        reportShaderMedia(env, property->format == MPV_FORMAT_NODE
+                            ? static_cast<mpv_node *>(property->data) : nullptr);
+                    break;
+                }
                 case MPV_EVENT_FILE_LOADED:
                     fileReady = true;
                     ended = false;
@@ -375,6 +384,34 @@ struct Player {
             }
         }
         vm->DetachCurrentThread();
+    }
+
+    void reportShaderMedia(JNIEnv *env, const mpv_node *params) {
+        // Read the delivered snapshot, never synchronously query width/height or mix observations.
+        auto field = [params](const char *name) -> const mpv_node * {
+            if (!params || params->format != MPV_FORMAT_NODE_MAP || !params->u.list) return nullptr;
+            for (int i = 0; i < params->u.list->num; ++i)
+                if (std::string(params->u.list->keys[i]) == name) return &params->u.list->values[i];
+            return nullptr;
+        };
+        auto number = [&](const char *name) -> int64_t {
+            const auto *value = field(name);
+            return value && value->format == MPV_FORMAT_INT64 ? value->u.int64 : 0;
+        };
+        auto text = [&](const char *name) -> std::string {
+            const auto *value = field(name);
+            return value && value->format == MPV_FORMAT_STRING && value->u.string ? value->u.string : "";
+        };
+        const int64_t width = number("w"), height = number("h");
+        const int64_t packed = width > 0 && width <= 65535 && height > 0 && height <= 65535
+            ? width * 65536 + height : 0;
+        const std::string media = "linuxShaderMedia/" + text("gamma") + "/" +
+            text("primaries") + "/" + text("colormatrix");
+        if (packed != lastShaderSize || media != lastShaderMedia) {
+            lastShaderSize = packed;
+            lastShaderMedia = media;
+            emit(env, media, static_cast<double>(packed));
+        }
     }
 
     void reportVideoParams(JNIEnv *env) {
@@ -487,6 +524,8 @@ void applyExtraMpvOptions(mpv_handle *mpv, const std::vector<std::string> &optio
             // The application owns these four runtime properties; begin neutral until decoded
             // colour metadata permits the shared SDR preset values to be applied.
             {"contrast", "0"}, {"brightness", "0"}, {"saturation", "0"}, {"gamma", "0"},
+            // Ordinary runtime-profile ownership, omitted in Full and overridable in Replace.
+            {"glsl-shaders", ""},
             {"cache", "yes"}, {"cache-pause", "yes"}, {"cache-pause-initial", "yes"},
             {"cache-pause-wait", "0.25"}, {"cache-secs", "600"}, {"demuxer-readahead-secs", "180"},
             {"demuxer-max-bytes", "1GiB"}, {"demuxer-max-back-bytes", "128MiB"},
@@ -754,6 +793,7 @@ JNI_METHOD(jlong, create)(
         std::string audio = text(env, sourceAudioUrl);
         if (!audio.empty()) option(player->mpv, "audio-files-append", audio);
         checkMpv(mpv_initialize(player->mpv), "mpv_initialize");
+        checkMpv(mpv_observe_property(player->mpv, 1, "video-params", MPV_FORMAT_NODE), "observe video-params");
         const char *load[] = {"loadfile", source.c_str(), nullptr};
         checkMpv(mpv_command(player->mpv, load), "loadfile");
         std::promise<bool> attached;

@@ -2,6 +2,7 @@ package com.nuvio.app.features.player.desktop
 
 import com.nuvio.app.features.player.DesktopAnimeMode
 import java.io.File
+import java.nio.file.Files
 
 /**
  * Exports the bundled Anime4K GLSL shaders (resources under `/player-shaders/`) to a temp directory
@@ -12,7 +13,8 @@ import java.io.File
  * set we bundle. Any shader file that fails to export is dropped from the chain so a missing asset
  * degrades gracefully instead of breaking playback.
  *
- * Windows-only: mpv's list path separator is `;` here, which also keeps drive letters (`C:\`) intact.
+ * The existing desktop `shaderChain` keeps its `;` separator (including Windows drive letters).
+ * Linux consumes `shaderPaths` and encodes the native mpv path list separately.
  */
 internal object DesktopAnimeShaders {
     private const val resourcePrefix = "/player-shaders/"
@@ -102,7 +104,10 @@ internal object DesktopAnimeShaders {
     )
 
     private val exportRoot: File by lazy {
-        File(System.getProperty("java.io.tmpdir"), "nuvio-shaders").apply { mkdirs() }
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            // One private export per process, at most the bundled files; delete files before directory.
+            Files.createTempDirectory("nuvio-shaders-").toFile().apply { deleteOnExit() }
+        } else File(System.getProperty("java.io.tmpdir"), "nuvio-shaders").apply { mkdirs() }
     }
 
     // name -> exported absolute path (or null if the resource could not be written).
@@ -113,11 +118,12 @@ internal object DesktopAnimeShaders {
      * Returns an empty string if the preset has no resolvable shaders.
      */
     fun shaderChain(preset: DesktopAnimeMode): String {
-        val names = presetShaderNames[preset] ?: return ""
-        return names
-            .mapNotNull { exportedPath(it) }
-            .joinToString(";")
+        return shaderPaths(preset).joinToString(";")
     }
+
+    @Synchronized
+    fun shaderPaths(preset: DesktopAnimeMode): List<String> =
+        presetShaderNames[preset].orEmpty().mapNotNull { exportedPath(it) }
 
     private fun exportedPath(name: String): String? = exportedPaths.getOrPut(name) {
         runCatching {
@@ -129,6 +135,7 @@ internal object DesktopAnimeShaders {
             if (!target.exists() || !target.readBytes().contentEquals(bytes)) {
                 target.writeBytes(bytes)
             }
+            if (DesktopHostOs.current == DesktopHostOs.LINUX) target.deleteOnExit()
             target.absolutePath
         }.getOrNull()
     }

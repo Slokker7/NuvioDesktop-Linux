@@ -1,5 +1,7 @@
 package com.nuvio.app.features.player
 
+import com.nuvio.app.features.player.desktop.LinuxShaderMedia
+import com.nuvio.app.features.player.desktop.linuxShaderProfile
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,6 +35,7 @@ import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerLaunchShield
 import com.nuvio.app.features.player.desktop.NativePlayerController
 import com.nuvio.app.features.player.desktop.applyLinuxBaseVideoProfile
+import com.nuvio.app.features.player.desktop.applyLinuxShaderProfile
 import com.nuvio.app.features.input.GamepadContext
 import com.nuvio.app.features.screensaver.DesktopScreensaver
 import com.nuvio.app.features.player.desktop.NativePlayerHost
@@ -149,6 +152,7 @@ private fun NativePlayerSurface(
     val hostFirstFullSizePaintComplete = remember { mutableStateOf(false) }
     val nativeSvpActive = remember { mutableStateOf(false) }
     val videoIsHdr = remember { mutableStateOf<Boolean?>(null) }
+    val linuxShaderMedia = remember { mutableStateOf<LinuxShaderMedia?>(null) }
     val videoVsrScale = remember { mutableStateOf<Double?>(null) }
     // Decoded source dimensions, reported by the native bridge at FILE_LOADED and again whenever an
     // adaptive stream switches resolution. Null until the first report.
@@ -265,6 +269,9 @@ private fun NativePlayerSurface(
                     true
                 } else if (type == "svpState") {
                     nativeSvpActive.value = value != 0.0
+                    true
+                } else if (DesktopHostOs.current == DesktopHostOs.LINUX && type.startsWith(LinuxShaderMedia.EVENT_PREFIX)) {
+                    linuxShaderMedia.value = LinuxShaderMedia.fromEvent(type, value)
                     true
                 } else if (type == "videoParams") {
                     videoIsHdr.value = value != 0.0
@@ -488,6 +495,7 @@ private fun NativePlayerSurface(
             tracePlaybackStart: Boolean,
             onError: (String?) -> Unit,
         ) {
+            if (DesktopHostOs.current == DesktopHostOs.LINUX) linuxShaderMedia.value = null
             controller.attach(
                 tracePlaybackStart = tracePlaybackStart,
                 sourceUrl = playbackUrl,
@@ -858,6 +866,7 @@ private fun NativePlayerSurface(
         videoIsHdr.value = null
         videoVsrScale.value = null
         videoSourceSize.value = null
+        linuxShaderMedia.value = null
         displayHdrEnabled.value = null
         // Note: the anime session override deliberately survives source changes — a forced preset
         // should carry across binged episodes and only reset when the player closes.
@@ -872,6 +881,9 @@ private fun NativePlayerSurface(
         // the async genre lookup for continue-watching/resume playback resolves (see
         // PlayerScreenRuntimeUi's fallback meta fetch) — without this key the anime profile
         // below would be stuck using whatever isAnimeContent was captured at launch.
+        var lastLinuxShaderChain: String? = null
+        var lastLinuxShaderMedia: LinuxShaderMedia? = null
+        var lastLinuxShaderRefresh = -1
         combine(
             snapshotFlow {
                 DesktopVideoProfileState(
@@ -879,6 +891,7 @@ private fun NativePlayerSurface(
                     displayHdr = displayHdrEnabled.value,
                     vsrScale = videoVsrScale.value,
                     sourceSize = videoSourceSize.value,
+                    linuxShaderMedia = linuxShaderMedia.value,
                     refreshToken = videoProfileRefreshToken.intValue,
                     pipelineReady = videoPipelineReady.value,
                     svpActive = nativeSvpActive.value,
@@ -891,6 +904,20 @@ private fun NativePlayerSurface(
                 if (DesktopHostOs.current == DesktopHostOs.LINUX) {
                     if (videoState.refreshToken > 0) {
                         controller.applyLinuxBaseVideoProfile(settings, videoState.isHdr)
+                        if (lastLinuxShaderRefresh != videoState.refreshToken) lastLinuxShaderChain = null
+                        lastLinuxShaderRefresh = videoState.refreshToken
+                        val media = videoState.linuxShaderMedia
+                        // Reset deduplication across native replacements, including same-URL retries.
+                        if (media == null && lastLinuxShaderMedia != null) lastLinuxShaderChain = null
+                        lastLinuxShaderMedia = media
+                        val shader = linuxShaderProfile(settings, isAnimeContent, media?.size,
+                            media?.confirmedSdr == true)
+                        if (shader == null) lastLinuxShaderChain = null
+                        else if (shader.chain != lastLinuxShaderChain) {
+                            controller.setMpvProperty("glsl-shaders", shader.chain)
+                            lastLinuxShaderChain = shader.chain
+                        }
+                        val shaderLabel = shader?.label
                         controller.setPlaybackInfo(
                             session = "$playbackAttemptId:${sourceUrl.hashCode()}",
                             hdrLabel = null,
@@ -900,7 +927,7 @@ private fun NativePlayerSurface(
                                 videoState.isHdr == false -> settings.desktopColorProfile.label
                                 else -> DesktopColorProfile.Neutral.label
                             },
-                            shaderLabel = null,
+                            shaderLabel = shaderLabel,
                         )
                     }
                     return@collect
@@ -1187,6 +1214,7 @@ private data class DesktopVideoProfileState(
     val displayHdr: Boolean?,
     val vsrScale: Double?,
     val sourceSize: DesktopVideoSourceSize?,
+    val linuxShaderMedia: LinuxShaderMedia?,
     val refreshToken: Int,
     val pipelineReady: Boolean,
     val svpActive: Boolean,
@@ -1395,6 +1423,17 @@ internal fun shouldEnableDesktopRtxSuperResolution(
     scale != null &&
     scale > 1.01
 
+internal fun desktopActiveAnimeMode(
+    mode: DesktopAnimeMode,
+    autoEnabled: Boolean,
+    sessionOverride: DesktopAnimeSessionOverride?,
+    isAnime: Boolean,
+): DesktopAnimeMode = when {
+    sessionOverride != null -> sessionOverride.mode
+    autoEnabled && isAnime -> mode
+    else -> DesktopAnimeMode.Off
+}
+
 private fun applyDesktopAnimeProfile(
     controller: NativePlayerController,
     mode: DesktopAnimeMode,
@@ -1412,11 +1451,7 @@ private fun applyDesktopAnimeProfile(
     customShaderPaths: String = "",
     customShaderSelectedPath: String = "",
 ): DesktopAnimeProfileResult {
-    val activeMode = when {
-        sessionOverride != null -> sessionOverride.mode
-        autoEnabled && isAnime -> mode
-        else -> DesktopAnimeMode.Off
-    }
+    val activeMode = desktopActiveAnimeMode(mode, autoEnabled, sessionOverride, isAnime)
     val activeShaderPath = sessionOverride?.customShaderPath ?: customShaderSelectedPath
     val requestedCustomShaderChain = if (activeMode == DesktopAnimeMode.CustomShader) {
         DesktopCustomShaders.shaderChain(

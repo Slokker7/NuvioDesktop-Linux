@@ -263,7 +263,7 @@ class LinuxBaseConfigurationTest {
         }
     }
 
-    private class Fixture : AutoCloseable {
+    internal class Fixture : AutoCloseable {
         val directory: Path = Files.createTempDirectory("nuvio-linux-base-config-")
         val first = directory.resolve("first.y4m")
         val second = directory.resolve("second.y4m")
@@ -333,6 +333,11 @@ class LinuxBaseConfigurationTest {
             value == expected || (expected.toDoubleOrNull() != null && value?.toDoubleOrNull() == expected.toDouble())
         }
 
+        fun screenshot(target: Path) {
+            Files.writeString(Path.of(report.toString() + ".screenshot"), target.toString())
+            waitFor { Files.exists(target) }
+        }
+
         fun applyProfile(isHdr: Boolean?) =
             controller!!.applyLinuxBaseVideoProfile(PlayerSettingsRepository.uiState.value, isHdr)
 
@@ -364,7 +369,14 @@ class LinuxBaseConfigurationTest {
                     local function observe()
                         local values = {}
                         values.path = mp.get_property('path')
-                        for key in string.gmatch('scale cscale dscale scale-antiring dither dither-depth temporal-dither deband deband-iterations deband-threshold deband-range deband-grain sigmoid-upscaling correct-downscaling linear-downscaling cache cache-pause cache-pause-initial cache-pause-wait cache-secs demuxer-readahead-secs demuxer-max-bytes demuxer-max-back-bytes stream-buffer-size hr-seek volume-max hwdec vo gpu-api gpu-context config contrast brightness saturation gamma speed', '%S+') do
+                        values.passes = utils.format_json(mp.get_property_native('vo-passes') or {})
+                        local request = io.open(report .. '.screenshot', 'r')
+                        if request then
+                            local target = request:read('*a'); request:close()
+                            os.remove(report .. '.screenshot')
+                            mp.commandv('screenshot-to-file', target, 'window')
+                        end
+                        for key in string.gmatch('scale cscale dscale scale-antiring dither dither-depth temporal-dither deband deband-iterations deband-threshold deband-range deband-grain sigmoid-upscaling correct-downscaling linear-downscaling cache cache-pause cache-pause-initial cache-pause-wait cache-secs demuxer-readahead-secs demuxer-max-bytes demuxer-max-back-bytes stream-buffer-size hr-seek volume-max hwdec vo gpu-api gpu-context config contrast brightness saturation gamma speed glsl-shaders vf target-trc tone-mapping mpv-version frame-drop-count decoder-frame-drop-count time-pos video-params/w video-params/h', '%S+') do
                             values[key] = mp.get_property(key)
                         end
                         for key in string.gmatch('cscale dscale dither-depth cache-secs volume-max', '%S+') do
