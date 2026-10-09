@@ -384,3 +384,72 @@ Actual video rendering, GPU/driver compatibility, audio-device selection and tea
 under real stream switching remain manual acceptance items. XWayland embedding is
 not native Wayland support; pure Wayland/AWT without an X11 drawable needs a later
 rendering approach.
+
+### In-app idle dimming (J07 / P07)
+
+`DesktopScreensaver` delegates Linux installation to `LinuxScreensaver`, which reuses the
+upstream owned black `JWindow`, opacity, blank cursor, fade and owner bounds tracking.
+Linux uses the POPUP window type: GNOME otherwise constrains the shade to the work
+area, leaving part of a fullscreen owner uncovered. Because this bypasses WM stacking,
+the shade is only mapped while its owner has AWT focus and unmaps immediately on focus
+loss/minimization. Focus return resets app-local idle. The existing Linux HUD focus
+adapter also observes an owner-root property: while dimmed it hides the separate
+always-raised native HUD, restoring it after fade-out, without changing native renderer
+code or keyboard focus. At partial opacity the video remains dimmed but HUD controls
+are hidden until dismissal.
+The dim-only controller reads the existing settings and mounted `playerActive` flag:
+paused/buffering players still use the playback delay; `activeDuringPlayback=false`
+suppresses dimming for the entire player lifecycle. Changing settings or closing the
+player reevaluates the current idle interval, without starting a new timer.
+
+A separate daemon worker queries input idle once per second, outside AWT and outside
+the playback inhibitor. Its read-only capability order is:
+
+1. `org.freedesktop.ScreenSaver.GetSessionIdleTime` (seconds), first at the standard
+   object path, then the older `/ScreenSaver` path. This is an optional extension,
+   **not guaranteed by the [idle inhibition specification](https://specifications.freedesktop.org/idle-inhibit/latest/)**.
+   GNOME here advertises it but returns `NotSupported`.
+2. Optional [`org.gnome.Mutter.IdleMonitor.GetIdletime`](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/data/dbus-interfaces/org.gnome.Mutter.IdleMonitor.xml)
+   (milliseconds), without checking desktop/distribution names. On GNOME/Wayland this
+   also observes input consumed by the native WebKit HUD.
+3. XScreenSaver `XScreenSaverQueryInfo` on an explicitly identified **X11 session**,
+   if built with the optional Xss headers. `libXss.so.1` is loaded only on demand;
+   its absence cannot prevent the player bridge from loading. Never used as a global
+   idle clock on Wayland/XWayland.
+4. Monotonic app-local AWT mouse, key and wheel activity. Local activity always wins
+   over an older session sample; observed session activity survives service failure.
+
+D-Bus calls do not activate services and have a 500 ms reply timeout. A failed source
+is released and rediscovered after 60 seconds; samples older than three seconds are
+ignored. Closing the installation removes input/window listeners, stops the timer,
+disposes the shade (including its fade timer/bounds listener), and queues native
+release on the same worker that owns the probe. Missing bridge/services are nonfatal.
+No settings, fake input, DPMS, compositor policy or system power commands are used.
+Shutdown settings remain stored/displayed as before but have no Linux action.
+
+Wayland does not guarantee a global input/foreground API. The compositor-specific
+Mutter service is optional; the Wayland `ext-idle-notify` protocol is not implemented
+by this milestone. Logind `IdleHint`/session presence and ScreenSaver `GetActive` are
+policy/boolean states, not elapsed input-idle clocks suitable for configurable delays.
+On an unsupported Wayland compositor the AWT fallback cannot see input swallowed by
+the native HUD. The shade covers only its owner and never requests always-on-top.
+The current Linux HUD deliberately retains AWT owner keyboard focus, so app-local
+focus suffices for the shade's visibility policy. No Linux global foreground-process
+claim is made; the Windows shutdown foreground-process policy is not ported.
+
+Verification: run `:composeApp:desktopTest` filtered to `*LinuxScreensaver*`,
+`*ScreensaverSettingsTest`, `*LinuxPlaybackInhibitorTest`, `*LinuxHudUiScaleTest` and
+`*LinuxNativePlayerBridgeTest` with Temurin 17. Opt into real JNI tests with
+`-Pnuvio.linux.nativeSmokeTest=true` and point `MPV_ROOT` at the existing runtime.
+The separate native lifecycle/failure suite is:
+
+```sh
+cmake --build composeApp/build/native/linux --target linux_screensaver_idle_probe
+python3 composeApp/src/desktopMain/native/linux/tests/screensaver_idle_test.py \
+  composeApp/build/native/linux/linux_screensaver_idle_probe
+```
+
+It uses a private D-Bus daemon and PyGObject, covering standard/legacy paths, Mutter,
+missing/denied/timed-out services, service failure, invalid ranges and repeated
+open/query/close. Real compositor stacking, mixed DPI and native HUD input still need
+session validation; unit tests alone do not prove those behaviors.

@@ -132,10 +132,11 @@ internal object DesktopScreensaver {
     private var nativeIdleUnavailable = false
 
     /**
-     * Installs the idle watch against [window]. Returns the uninstaller. No-op off Windows: the
-     * idle probe and the shutdown command are both Windows-only, and this fork ships nowhere else.
+     * Installs the idle watch against [window]. Linux has a separate dim-only controller;
+     * the Windows idle/shutdown policy below and the macOS no-op remain unchanged.
      */
     fun install(window: Window, exitApplication: () -> Unit): () -> Unit {
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) return LinuxScreensaver.install(window)
         if (DesktopHostOs.current != DesktopHostOs.WINDOWS) return {}
         uninstall()
         owner = window
@@ -314,7 +315,7 @@ internal object DesktopScreensaver {
      * sized to the owner and re-sized with it. Mouse input over it is the wake signal, so nothing
      * is done to make it click-through.
      */
-    private class Shade(private val owner: Window) : JWindow(owner) {
+    internal class Shade(private val owner: Window) : JWindow(owner) {
         private var currentOpacity = 0f
         private var targetOpacity = 0f
         private var countdownSeconds: Int? = null

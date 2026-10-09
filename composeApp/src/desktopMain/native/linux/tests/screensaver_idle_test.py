@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Isolated session-bus contract/lifecycle tests. Usage: python3 this.py /path/to/probe.
+Requires PyGObject and dbus-daemon; never connects to or changes the real desktop bus.
+"""
+import os
+import subprocess
+import sys
+import threading
+from gi.repository import Gio, GLib
+
+SAVER = 'org.freedesktop.ScreenSaver'
+MUTTER = 'org.gnome.Mutter.IdleMonitor'
+XML = '''<node>
+<interface name="org.freedesktop.ScreenSaver"><method name="GetSessionIdleTime"><arg type="u" direction="out"/></method></interface>
+<interface name="org.gnome.Mutter.IdleMonitor"><method name="GetIdletime"><arg type="t" direction="out"/></method></interface>
+</node>'''
+info = Gio.DBusNodeInfo.new_for_xml(XML)
+loop = GLib.MainLoop()
+thread = threading.Thread(target=loop.run, daemon=True)
+thread.start()
+try:
+    for mode in ['standard', 'legacy', 'mutter', 'missing', 'denied', 'timeout', 'lost', 'overflow', 'busloss']:
+        daemon = subprocess.Popen(['dbus-daemon', '--session', '--nofork', '--print-address=1'], stdout=subprocess.PIPE, text=True)
+        address = daemon.stdout.readline().strip()
+        bus = Gio.DBusConnection.new_for_address_sync(address,
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+        bus.set_exit_on_close(False)
+        calls = []
+        def method(connection, sender, path, interface, name, args, invocation):
+            calls.append((interface, path, name))
+            if mode == 'timeout':
+                return  # Client timeout is bounded; no reply.
+            if mode == 'lost' and len(calls) > 1:
+                invocation.return_dbus_error('org.freedesktop.DBus.Error.Failed', 'service lost')
+            elif mode == 'denied':
+                invocation.return_dbus_error('org.freedesktop.DBus.Error.AccessDenied', 'denied')
+            elif interface == SAVER and (mode in ('standard', 'lost', 'busloss') or (mode == 'legacy' and path == '/ScreenSaver')):
+                invocation.return_value(GLib.Variant('(u)', (42,)))
+            elif interface == MUTTER and mode in ('mutter', 'overflow'):
+                invocation.return_value(GLib.Variant('(t)', (123456 if mode == 'mutter' else 2**64 - 1,)))
+            else:
+                invocation.return_dbus_error('org.freedesktop.DBus.Error.NotSupported', 'not implemented')
+        try:
+            if mode != 'missing':
+                for name in [SAVER, MUTTER]:
+                    bus.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
+                        'RequestName', GLib.Variant('(su)', (name, 0)), None, Gio.DBusCallFlags.NONE, 1000, None)
+                for path, interface in [('/org/freedesktop/ScreenSaver', info.interfaces[0]),
+                    ('/ScreenSaver', info.interfaces[0]), ('/org/gnome/Mutter/IdleMonitor/Core', info.interfaces[1])]:
+                    bus.register_object(path, interface, method, None, None)
+            env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=address, XDG_SESSION_TYPE='wayland', WAYLAND_DISPLAY='test')
+            if mode == 'busloss':
+                process = subprocess.Popen([sys.argv[1], '--interactive'], env=env, text=True,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                first = process.stdout.readline()
+                daemon.terminate()
+                daemon.wait(timeout=5)
+                stdout, stderr = process.communicate('\n\n', timeout=5)
+                assert process.returncode == 0, stderr
+                values = list(map(int, (first + stdout).split()))
+            else:
+                result = subprocess.run([sys.argv[1]], env=env, text=True, capture_output=True, timeout=12, check=True)
+                values = list(map(int, result.stdout.split()))
+            expected = {'standard': [42000]*4, 'legacy': [42000]*4, 'mutter': [123456]*4,
+                'lost': [42000, -1, -1, -1], 'busloss': [42000, -1, -1, -1]}.get(mode, [-1]*4)
+            assert values == expected, (mode, values)
+            assert all(call[2] in ('GetSessionIdleTime', 'GetIdletime') for call in calls)
+            print(f'PASS {mode}: {values}', flush=True)
+        finally:
+            if not bus.is_closed():
+                bus.close_sync(None)
+            daemon.terminate()
+            daemon.wait(timeout=5)
+finally:
+    loop.quit()
+    thread.join(timeout=5)
