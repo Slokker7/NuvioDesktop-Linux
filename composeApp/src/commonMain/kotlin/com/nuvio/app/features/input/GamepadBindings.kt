@@ -5,10 +5,10 @@ import kotlinx.coroutines.flow.StateFlow
 /**
  * Bridge exposing the desktop gamepad layer to shared settings code, shaped like
  * `PlayerShortcutBindings` next door. Only a desktop actual exists (the sole KMP target), and even
- * there the whole feature is inert off Windows — see [gamepadSupported].
+ * there availability follows the platform backend — see [gamepadSupported].
  */
 
-/** False where XInput does not exist; the settings section hides itself entirely. */
+/** False where no controller backend exists; the settings section hides itself entirely. */
 expect fun gamepadSupported(): Boolean
 
 expect fun ensureGamepadSettingsLoaded()
@@ -16,7 +16,7 @@ expect fun ensureGamepadSettingsLoaded()
 expect fun gamepadEnabledState(): StateFlow<Boolean>
 expect fun setGamepadEnabled(enabled: Boolean)
 
-/** True while a pad is answering XInput, so the settings row can say so instead of guessing. */
+/** True while a pad is connected, so the settings row can say so instead of guessing. */
 expect fun gamepadConnectedState(): StateFlow<Boolean>
 
 expect fun gamepadDeadZoneState(): StateFlow<Float>

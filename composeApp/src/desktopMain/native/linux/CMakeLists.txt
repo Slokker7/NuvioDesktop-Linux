@@ -32,7 +32,7 @@ if(NOT EXISTS "${MPV_INCLUDE_DIR}/mpv/client.h" OR
     message(FATAL_ERROR "libmpv headers/library not found; set MPV_ROOT to the mpv installation prefix")
 endif()
 
-add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp seek_thumbnails.cpp playback_inhibitor.cpp screensaver_idle.cpp mpris_session.cpp)
+add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp seek_thumbnails.cpp playback_inhibitor.cpp screensaver_idle.cpp mpris_session.cpp linux_gamepad.cpp)
 # Optional X11 idle fallback. Wayland sessions never use an XWayland global idle estimate.
 find_path(XSS_INCLUDE_DIR NAMES X11/extensions/scrnsaver.h)
 if(XSS_INCLUDE_DIR)
@@ -68,6 +68,13 @@ target_include_directories(linux_seek_thumbnail_probe PRIVATE "${MPV_INCLUDE_DIR
 target_link_libraries(linux_seek_thumbnail_probe PRIVATE Threads::Threads "${MPV_LIBRARY}" PkgConfig::GTK3)
 target_link_options(linux_seek_thumbnail_probe PRIVATE "LINKER:--wrap=mpv_initialize")
 set_target_properties(linux_seek_thumbnail_probe PROPERTIES BUILD_RPATH "${MPV_LIBRARY_DIR}")
+
+# Deterministic controller fixtures; no real devices, display, mpv or JNI initialization.
+add_executable(linux_gamepad_test EXCLUDE_FROM_ALL tests/linux_gamepad_test.cpp linux_gamepad.cpp)
+target_compile_features(linux_gamepad_test PRIVATE cxx_std_17)
+target_compile_definitions(linux_gamepad_test PRIVATE NUVIO_GAMEPAD_TEST)
+target_compile_options(linux_gamepad_test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(linux_gamepad_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Read-only idle backend lifecycle probe; does not initialize mpv or GTK.
 add_executable(linux_screensaver_idle_probe EXCLUDE_FROM_ALL

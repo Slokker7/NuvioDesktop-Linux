@@ -37,9 +37,9 @@ internal object GamepadContext {
 internal enum class StickDirection { Up, Down, Left, Right }
 
 /**
- * Reads XInput on a background thread and replays what it finds as keystrokes.
+ * Reads platform controller samples on a background thread and replays them as keystrokes.
  *
- * Windows-only, and off unless the user turns it on. Start/stop is driven from the window
+ * Windows/Linux, and off unless the user turns it on. Start/stop is driven from the window
  * lifecycle in Main; the thread itself parks on a monitor while disabled, so a disabled pad — or a
  * machine with no pad at all — costs nothing beyond one idle thread.
  */
@@ -134,6 +134,8 @@ object GamepadInput {
     private var unavailable = false
 
     private var thread: Thread? = null
+    private val linuxSession = LinuxGamepadSessionGate()
+    private val isLinux get() = DesktopHostOs.current == DesktopHostOs.LINUX
 
     /**
      * When the pad was last actually used. A connected controller sitting on the sofa is not the
@@ -159,14 +161,20 @@ object GamepadInput {
     }
 
     /**
-     * Installs the poll thread. Safe to call when gamepad support is off or the host is not
-     * Windows — both cases no-op, and the native library is never touched.
+     * Installs the poll thread on supported hosts. Native loading stays lazy while disabled.
      */
     fun start() {
-        if (DesktopHostOs.current != DesktopHostOs.WINDOWS) return
+        if (isLinux) linuxSession.update { startPolling() } else startPolling()
+    }
+
+    private fun startPolling() {
+        val backend = createGamepadBackend(DesktopHostOs.current) ?: return
         if (!started.compareAndSet(false, true)) return
         val myGeneration = generation.get()
-        thread = Thread({ pollLoop(myGeneration) }, "nuvio-gamepad").apply {
+        thread = Thread({
+            if (isLinux) linuxSession.run({ isCurrent(myGeneration) }) { pollLoop(myGeneration, backend) }
+            else pollLoop(myGeneration, backend)
+        }, "nuvio-gamepad").apply {
             isDaemon = true
             // Below the UI: this thread only synthesizes events, it must never compete with drawing.
             priority = Thread.NORM_PRIORITY - 1
@@ -175,8 +183,13 @@ object GamepadInput {
     }
 
     fun stop() {
+        if (isLinux) linuxSession.update { stopPolling() } else stopPolling()
+    }
+
+    private fun stopPolling() {
         if (!started.compareAndSet(true, false)) return
         generation.incrementAndGet()
+        if (isLinux) GamepadSettingsRepository.setConnected(false)
         wakeLock.withLock { wakeCondition.signalAll() }
         thread = null
     }
@@ -189,7 +202,7 @@ object GamepadInput {
         wakeLock.withLock { wakeCondition.signalAll() }
     }
 
-    private fun pollLoop(myGeneration: Int) {
+    private fun pollLoop(myGeneration: Int, backend: GamepadBackend) {
         val state = IntArray(SLOT_COUNT * SLOT_STRIDE)
         var pressed = emptySet<GamepadButton>()
         val repeatDueAt = HashMap<GamepadButton, Long>()
@@ -198,56 +211,75 @@ object GamepadInput {
         var connectedMask = 0
         var nextRescanAt = 0L
 
-        while (isCurrent(myGeneration)) {
-            if (!GamepadSettingsRepository.enabled || unavailable) {
-                // Parked: no polling, no native call, no wakeups until the setting changes.
-                pressed = emptySet()
-                repeatDueAt.clear()
-                releaseHeldKeys(heldKeys)
-                connectedMask = 0
-                nextRescanAt = 0L
-                GamepadSettingsRepository.setConnected(false)
-                wakeLock.withLock {
-                    if (isCurrent(myGeneration) && (!GamepadSettingsRepository.enabled || unavailable)) {
-                        runCatching { wakeCondition.await(1, TimeUnit.SECONDS) }
+        try {
+            while (isCurrent(myGeneration)) {
+                if (!GamepadSettingsRepository.enabled || unavailable) {
+                    // Disabled: release input and park; enabling wakes the worker immediately.
+                    pressed = emptySet()
+                    repeatDueAt.clear()
+                    releaseHeldKeys(heldKeys)
+                    connectedMask = 0
+                    nextRescanAt = 0L
+                    if (isLinux) {
+                        backend.close()
+                        linuxSession.publish({ isCurrent(myGeneration) }) { GamepadSettingsRepository.setConnected(false) }
+                    } else GamepadSettingsRepository.setConnected(false)
+                    wakeLock.withLock {
+                        if (isCurrent(myGeneration) && (!GamepadSettingsRepository.enabled || unavailable)) {
+                            runCatching { wakeCondition.await(1, TimeUnit.SECONDS) }
+                        }
                     }
+                    continue
                 }
-                continue
+
+                if (!isLinux && !ensureNativeReady()) continue
+
+                val now = System.currentTimeMillis()
+                // A narrow tick asks only about slots already known to be connected; the periodic full
+                // tick is what discovers a pad that was plugged in since. Either way the answer is the
+                // whole truth about the slots that were asked, so it replaces the mask outright.
+                val slotMask = if (now >= nextRescanAt) {
+                    nextRescanAt = now + RESCAN_INTERVAL_MS
+                    ALL_SLOTS
+                } else {
+                    connectedMask
+                }
+
+                if (slotMask != 0) {
+                    connectedMask = runCatching { backend.poll(slotMask, state) }
+                        .onFailure {
+                            if (isLinux) {
+                                log.w(it) { "Linux gamepad poll failed; discovery will retry" }
+                                backend.close()
+                            } else {
+                                log.w(it) { "XInput poll failed; gamepad input disabled for this session" }
+                                unavailable = true
+                            }
+                        }
+                        .getOrDefault(0)
+                    if (!isLinux) GamepadSettingsRepository.setConnected(connectedMask != 0)
+                }
+
+                val current = if (connectedMask == 0) emptySet() else readPressed(state, connectedMask)
+                if (isLinux) {
+                    if (!linuxSession.publish({ isCurrent(myGeneration) }) {
+                        GamepadSettingsRepository.setConnected(connectedMask != 0)
+                        dispatch(current, pressed, repeatDueAt, heldKeys, now)
+                    }) break
+                } else dispatch(current, pressed, repeatDueAt, heldKeys, now)
+                pressed = current
+
+                // With nothing plugged in there is no input to miss, so idle until the next rescan
+                // rather than waking sixty times a second on a machine that has no controller.
+                sleep(if (connectedMask == 0) IDLE_POLL_INTERVAL_MS else POLL_INTERVAL_MS)
             }
-
-            if (!ensureNativeReady()) continue
-
-            val now = System.currentTimeMillis()
-            // A narrow tick asks only about slots already known to be connected; the periodic full
-            // tick is what discovers a pad that was plugged in since. Either way the answer is the
-            // whole truth about the slots that were asked, so it replaces the mask outright.
-            val slotMask = if (now >= nextRescanAt) {
-                nextRescanAt = now + RESCAN_INTERVAL_MS
-                ALL_SLOTS
-            } else {
-                connectedMask
-            }
-
-            if (slotMask != 0) {
-                connectedMask = runCatching { NativePlayerBridge.pollGamepads(slotMask, state) }
-                    .onFailure {
-                        log.w(it) { "XInput poll failed; gamepad input disabled for this session" }
-                        unavailable = true
-                    }
-                    .getOrDefault(0)
-                GamepadSettingsRepository.setConnected(connectedMask != 0)
-            }
-
-            val current = if (connectedMask == 0) emptySet() else readPressed(state, connectedMask)
-            dispatch(current, pressed, repeatDueAt, heldKeys, now)
-            pressed = current
-
-            // With nothing plugged in there is no input to miss, so idle until the next rescan
-            // rather than waking sixty times a second on a machine that has no controller.
-            sleep(if (connectedMask == 0) IDLE_POLL_INTERVAL_MS else POLL_INTERVAL_MS)
+        } finally {
+            // Terminal releases finish before a new Linux worker can acquire session ownership.
+            releaseHeldKeys(heldKeys)
+            backend.close()
+            if (isLinux) linuxSession.publish({ isCurrent(myGeneration) }) { GamepadSettingsRepository.setConnected(false) }
+            else GamepadSettingsRepository.setConnected(false)
         }
-        releaseHeldKeys(heldKeys)
-        GamepadSettingsRepository.setConnected(false)
     }
 
     private fun releaseHeldKeys(heldKeys: MutableMap<GamepadButton, Int>) {
@@ -273,8 +305,11 @@ object GamepadInput {
      * Collapses every connected pad into one set of held controls. Merging rather than picking a
      * "primary" pad means a second controller just works, and costs only the OR.
      */
-    private fun readPressed(state: IntArray, connectedMask: Int): Set<GamepadButton> {
-        val deadZone = GamepadSettingsRepository.deadZone
+    internal fun readPressed(
+        state: IntArray,
+        connectedMask: Int,
+        deadZone: Float = GamepadSettingsRepository.deadZone,
+    ): Set<GamepadButton> {
         val held = HashSet<GamepadButton>()
         for (slot in 0 until SLOT_COUNT) {
             if (connectedMask and (1 shl slot) == 0) continue
