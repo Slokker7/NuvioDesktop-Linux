@@ -271,6 +271,33 @@ and replaces chaptered/unchaptered sources 20 times with stats visible. Stats
 tests observe the built-in script's active page bindings and cover absent support.
 These fixtures and observers are test-only and require no external encoder.
 
+## Playback sleep/screensaver inhibition
+
+Linux consumes the shared `keepScreenAwake` intent: playing, or loading while
+playback is requested, without a playback error. One process-wide owner combines
+composition requests into a single session lease; pause, error, player teardown
+and application exit release it. Blocking acquisition/release runs on an IO worker,
+independent of GTK, mpv and native-window lifetime. Late acquisitions are released
+after disposal; repeated intent does not create duplicate leases.
+
+The preferred backend is the XDG desktop Inhibit portal with Idle + Suspend
+flags (12), an empty parent-window identifier and a checked asynchronous Response.
+If unavailable or refused, the fallback requires both a freedesktop ScreenSaver
+cookie and a logind `idle:sleep` block FD; partial acquisition is unwound. Requests
+use private D-Bus connections, explicit release and connection/FD cleanup on exit.
+Backend loss invalidates ownership and permits one event-driven reconnect per
+intent transition. Failure logs a diagnostic and leaves playback usable; there is
+no polling, interactive authorization or persistent power-setting change.
+
+`stop-screensaver=no` remains deliberate: this session owner handles inhibition,
+avoiding mpv's additional X11 screensaver/DPMS policy. The backend is independent
+of the X11/XWayland video surface. Real playback and inhibitor ownership were
+validated on GNOME Wayland with the XWayland player; other desktops depend on
+their portal or fallback services and have not been physically validated. The
+opt-in real-session test in `LinuxPlaybackInhibitorTest` uses GNOME's inhibitor
+observer; the remaining lifecycle tests use a fake backend. No hardware suspend
+is performed. Nuvio's idle dimming shade and optional shutdown remain separate.
+
 ## Deliberately absent
 
 `setMediaSessionMetadata` remains an explicit void no-op: Linux media sessions
@@ -284,7 +311,7 @@ native window chrome/fullscreen/PiP, gamepads, media identity and system
 idle/foreground queries. Optional shortcuts for these deferred
 features should not be used during acceptance testing.
 
-No PiP, gamepads, media keys, screensaver inhibition, Linux native fullscreen,
+No PiP, gamepads, media keys, Linux native fullscreen,
 native Wayland rendering or packaging is added. Advanced HUD actions may still
 reach deferred bridge methods; this is a controls transport/embedding spike.
 Physical keyboard focus and transparent compositing over real video need manual

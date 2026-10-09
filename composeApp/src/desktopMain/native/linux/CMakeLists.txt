@@ -32,7 +32,7 @@ if(NOT EXISTS "${MPV_INCLUDE_DIR}/mpv/client.h" OR
     message(FATAL_ERROR "libmpv headers/library not found; set MPV_ROOT to the mpv installation prefix")
 endif()
 
-add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp seek_thumbnails.cpp)
+add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp seek_thumbnails.cpp playback_inhibitor.cpp)
 target_compile_features(player_bridge PRIVATE cxx_std_17)
 target_include_directories(player_bridge PRIVATE "${MPV_INCLUDE_DIR}")
 target_include_directories(player_bridge SYSTEM PRIVATE

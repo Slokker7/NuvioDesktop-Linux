@@ -1,6 +1,8 @@
 package com.nuvio.app.features.player
 
 import com.nuvio.app.core.ui.DesktopArtworkCaches
+import com.nuvio.app.features.player.desktop.DesktopHostOs
+import com.nuvio.app.features.player.desktop.LinuxPlaybackInhibition
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.Composable
@@ -15,6 +17,9 @@ actual fun LockPlayerToLandscape() = Unit
 
 @Composable
 actual fun EnterImmersivePlayerMode(keepScreenAwake: Boolean) {
+    if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+        LinuxPlaybackInhibition(keepScreenAwake)
+    }
     // Main-player lifecycle only: hero trailers must keep the browsing cache warm. A brief open
     // and back cancels the delay; pause/resume and screen-awake changes do not restart it.
     LaunchedEffect(Unit) {
