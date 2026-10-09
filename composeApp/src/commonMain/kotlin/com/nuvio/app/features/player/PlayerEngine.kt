@@ -98,6 +98,11 @@ data class PlayerControlsState(
     // Poster/backdrop URL for the Windows media-session thumbnail. Desktop-only; other platforms
     // and the hero-trailer surfaces leave it blank, which clears the thumbnail.
     val mediaSessionArtwork: String = "",
+    // Exact runtime navigation verdicts for desktop OS media-session capability reporting.
+    val mediaSessionCanGoNext: Boolean = false,
+    val mediaSessionCanGoPrevious: Boolean = false,
+    val mediaSessionSeason: Int = 0,
+    val mediaSessionEpisode: Int = 0,
     val streamTitle: String = "",
     // The addon's real media file name; mpv's diagnostics show it ahead of the source label.
     val streamFilename: String = "",

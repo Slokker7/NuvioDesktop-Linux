@@ -1059,5 +1059,11 @@ Java_com_nuvio_app_features_player_desktop_LinuxPlayerControlsBridge_setWindowFo
 }
 // Media session integration is still absent.
 JNI_METHOD(void, setMediaSessionMetadata)(JNIEnv *, jobject, jlong, jstring, jstring, jstring) {}
+
+// Linux-only capability query; shared platforms retain their existing JNI contract.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_nuvio_app_features_player_desktop_LinuxMprisNative_seekable(JNIEnv *env, jobject, jlong handle) {
+    return withPlayer(env, handle, [](Player &p) -> jboolean { return p.flag("seekable"); });
+}
 // X11's mpv VO owns expose/resize/redraw, unlike the Windows D3D redraw workaround.
 JNI_METHOD(void, forceVideoRedraw)(JNIEnv *, jobject, jlong) {}

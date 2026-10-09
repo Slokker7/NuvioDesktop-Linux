@@ -83,6 +83,7 @@ internal const val TRAILER_AUDIO_NORMALIZATION_FILTER = "dynaudnorm=f=150:g=15"
 
 internal class NativePlayerController(
     private val host: NativePlayerHost,
+    private val linuxMprisOwner: () -> LinuxMprisSession = { LinuxMediaSession.owner },
 ) : PlayerEngineController {
     init {
         if (DesktopHostOs.current == DesktopHostOs.LINUX) {
@@ -169,6 +170,7 @@ internal class NativePlayerController(
     // Installed by the desktop engine for each attach; see reconnectAfterRateLimit.
     @Volatile
     var rateLimitFailoverFallback: ((String) -> Boolean)? = null
+    private var linuxMpris: LinuxMprisPlayer? = null
     private var controlsState = PlayerControlsState()
     private var lastSentControlsStructureKey: PlayerControlsState? = null
     private var lastSentMediaSessionKey: String? = null
@@ -303,6 +305,10 @@ internal class NativePlayerController(
             tracePlaybackStart = tracePlaybackStart,
             restoreVolume = restoreVolume,
         )
+        if (DesktopHostOs.current == DesktopHostOs.LINUX && restoreVolume && linuxMpris == null) {
+            linuxMpris = LinuxMprisPlayer(this, linuxMprisOwner()) { !disposed && handle != 0L }
+        }
+        linuxMpris?.sourceChanging(handle)
         pendingSource = pending
         lastSeekFailureTargetMs = null
         host.onPeerReady = { attachPending() }
@@ -327,6 +333,7 @@ internal class NativePlayerController(
             } else {
                 AwtNativeViewResolver.resolveNativeViewPointer(host)
             }
+            linuxMpris?.sourceChanging(handle)
             // Stop UI commands targeting the outgoing player on the EDT, but retain
             // its native lifetime separately so Linux peer removal cannot miss it.
             val previousHandle = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
@@ -481,6 +488,7 @@ internal class NativePlayerController(
         val currentHandle = handle
         val structureKey = state.nativeControlsStructureKey()
         val current = currentHandle.takeIf { it != 0L } ?: return
+        linuxMpris?.update(state, current)
         val mpvMediaTitle = preferredMpvMediaTitle(
             streamTitle = state.streamTitle,
             streamFilename = state.streamFilename,
@@ -1251,6 +1259,7 @@ internal class NativePlayerController(
                 positionMs = positionMs,
                 bufferedPositionMs = bufferedPositionMs,
             )
+            linuxMpris?.update(controlsState, current)
             PlayerPlaybackSnapshot(
                 isLoading = isLoading,
                 isPlaying = !isPaused && !isLoading && !isEnded,
@@ -1265,6 +1274,8 @@ internal class NativePlayerController(
 
     fun dispose() {
         disposed = true
+        linuxMpris?.close()
+        linuxMpris = null
         linuxWindowFocus?.close()
         attachGeneration.incrementAndGet()
         pendingSource = null
