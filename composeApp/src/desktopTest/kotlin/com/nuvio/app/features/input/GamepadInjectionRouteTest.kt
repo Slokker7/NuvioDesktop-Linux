@@ -1,5 +1,6 @@
 package com.nuvio.app.features.input
 
+import com.nuvio.app.LiveDisplayTests
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -37,7 +38,7 @@ import kotlin.test.assertTrue
  * Needs a display and a focused window, and focus is global — while this runs, keystrokes meant for
  * another application land in its window instead. It is therefore **opt-in**:
  *
- *     ./gradlew desktopTest -Pnuvio.focusTests
+ *     NUVIO_RUN_LIVE_DISPLAY_TESTS=1 ./gradlew desktopTest -Pnuvio.focusTests
  *
  * Run it before shipping input changes, and on CI where nobody is at the keyboard. There is no
  * offscreen equivalent: `ImageComposeScene` takes an already-converted Compose event, and Compose's
@@ -52,6 +53,7 @@ class GamepadInjectionRouteTest {
 
     @Test
     fun `a synthetic key event reaches both the AWT dispatcher and Compose`() {
+        LiveDisplayTests.assumeEnabled()
         if (System.getProperty("nuvio.focusTests") != "true") {
             println("SKIPPED: takes OS focus and would swallow keystrokes; run with -Pnuvio.focusTests")
             return

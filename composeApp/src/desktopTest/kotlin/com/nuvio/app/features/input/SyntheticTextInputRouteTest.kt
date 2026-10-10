@@ -1,5 +1,6 @@
 package com.nuvio.app.features.input
 
+import com.nuvio.app.LiveDisplayTests
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.getValue
@@ -31,7 +32,7 @@ import kotlin.test.fail
  * Takes OS focus while it runs, so anything typed on the machine lands in its window instead — it
  * has swallowed a message mid-sentence before now. **Opt-in** for that reason:
  *
- *     ./gradlew desktopTest -Pnuvio.focusTests
+ *     NUVIO_RUN_LIVE_DISPLAY_TESTS=1 ./gradlew desktopTest -Pnuvio.focusTests
  *
  * The assertion is about the probe characters arriving *in order*, not the field's exact contents,
  * so a stray keystroke is noise rather than a failure.
@@ -45,6 +46,7 @@ class SyntheticTextInputRouteTest {
 
     @Test
     fun `synthetic typed characters reach a focused Compose text field`() {
+        LiveDisplayTests.assumeEnabled()
         if (System.getProperty("nuvio.focusTests") != "true") {
             println("SKIPPED: takes OS focus and would swallow keystrokes; run with -Pnuvio.focusTests")
             return

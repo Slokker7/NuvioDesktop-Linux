@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player.desktop
 
+import com.nuvio.app.LiveDisplayTests
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
@@ -27,6 +28,9 @@ import kotlin.test.assertTrue
 
 /** Effective properties from the private libmpv; the observer never changes player state. */
 class LinuxBaseConfigurationTest {
+    @org.junit.Before
+    fun requireLiveDisplay() = LiveDisplayTests.assumeEnabled()
+
     private fun enabled() = DesktopHostOs.current == DesktopHostOs.LINUX &&
         System.getProperty("nuvio.linux.nativeSmokeTest") == "true" && !GraphicsEnvironment.isHeadless()
 

@@ -32,7 +32,7 @@ if(NOT EXISTS "${MPV_INCLUDE_DIR}/mpv/client.h" OR
     message(FATAL_ERROR "libmpv headers/library not found; set MPV_ROOT to the mpv installation prefix")
 endif()
 
-add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp seek_thumbnails.cpp playback_inhibitor.cpp screensaver_idle.cpp mpris_session.cpp linux_gamepad.cpp)
+add_library(player_bridge SHARED player_bridge.cpp awt_view_resolver.cpp controls_overlay.cpp seek_thumbnails.cpp playback_inhibitor.cpp screensaver_idle.cpp mpris_session.cpp linux_gamepad.cpp window_chrome.cpp window_chrome_jni.cpp pip_geometry_jni.cpp)
 # Optional X11 idle fallback. Wayland sessions never use an XWayland global idle estimate.
 find_path(XSS_INCLUDE_DIR NAMES X11/extensions/scrnsaver.h)
 if(XSS_INCLUDE_DIR)
@@ -69,6 +69,23 @@ target_link_libraries(linux_seek_thumbnail_probe PRIVATE Threads::Threads "${MPV
 target_link_options(linux_seek_thumbnail_probe PRIVATE "LINKER:--wrap=mpv_initialize")
 set_target_properties(linux_seek_thumbnail_probe PROPERTIES BUILD_RPATH "${MPV_LIBRARY_DIR}")
 
+# Deterministic chrome policy fixtures; no display, WM, mpv or JNI initialization.
+add_executable(linux_pip_geometry_dispatch_test EXCLUDE_FROM_ALL tests/pip_geometry_dispatch_test.cpp)
+target_compile_features(linux_pip_geometry_dispatch_test PRIVATE cxx_std_17)
+target_compile_options(linux_pip_geometry_dispatch_test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(linux_pip_geometry_dispatch_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(linux_pip_geometry_dispatch_test PRIVATE Threads::Threads)
+
+add_executable(linux_pip_hud_geometry_test EXCLUDE_FROM_ALL tests/pip_hud_geometry_test.cpp)
+target_compile_features(linux_pip_hud_geometry_test PRIVATE cxx_std_17)
+target_compile_options(linux_pip_hud_geometry_test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(linux_pip_hud_geometry_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(linux_window_chrome_test EXCLUDE_FROM_ALL tests/window_chrome_test.cpp window_chrome.cpp)
+target_compile_features(linux_window_chrome_test PRIVATE cxx_std_17)
+target_compile_options(linux_window_chrome_test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(linux_window_chrome_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+
 # Deterministic controller fixtures; no real devices, display, mpv or JNI initialization.
 add_executable(linux_gamepad_test EXCLUDE_FROM_ALL tests/linux_gamepad_test.cpp linux_gamepad.cpp)
 target_compile_features(linux_gamepad_test PRIVATE cxx_std_17)
@@ -87,3 +104,8 @@ if(XSS_INCLUDE_DIR)
     target_include_directories(linux_screensaver_idle_probe SYSTEM PRIVATE "${XSS_INCLUDE_DIR}" "${X11_INCLUDE_DIR}" "${X11_PROTOCOL_INCLUDE_DIR}")
     target_link_libraries(linux_screensaver_idle_probe PRIVATE ${CMAKE_DL_LIBS} "${X11_LIBRARY}")
 endif()
+
+add_executable(linux_pip_hud_visibility_test EXCLUDE_FROM_ALL tests/pip_hud_visibility_test.cpp)
+target_compile_features(linux_pip_hud_visibility_test PRIVATE cxx_std_17)
+target_compile_options(linux_pip_hud_visibility_test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(linux_pip_hud_visibility_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

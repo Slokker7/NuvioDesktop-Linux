@@ -48,7 +48,9 @@ internal class LinuxPlayerWindowFocus(
     private fun publish(value: Boolean) {
         // The override-redirect HUD raises itself above managed/owned windows. While the
         // Linux shade is mapped, keep the HUD hidden without falsifying actual AWT focus.
-        focused = value && (window as? RootPaneContainer)?.rootPane?.getClientProperty(DimmedProperty) != true
+        val shadeHidden = (window as? RootPaneContainer)?.rootPane?.getClientProperty(DimmedProperty) == true
+        if (!value || shadeHidden) host.onLinuxPiPCancelGesture?.invoke()
+        focused = value && !shadeHidden
         onFocusChanged(focused)
     }
 

@@ -135,6 +135,9 @@ internal class NativePlayerController(
             }
         }
     } else null
+
+    private val linuxPiPInput = LinuxPiPSurfaceInput.install(DesktopHostOs.current, host) { handlePlayerEvent("toggle", 0.0) }
+
     @Volatile
     private var pendingSource: PendingSource? = null
     private val pendingMpvProperties = linkedMapOf<String, String>()
@@ -1276,6 +1279,7 @@ internal class NativePlayerController(
         disposed = true
         linuxMpris?.close()
         linuxMpris = null
+        linuxPiPInput?.close()
         linuxWindowFocus?.close()
         attachGeneration.incrementAndGet()
         pendingSource = null

@@ -47,6 +47,10 @@ internal fun applyNativeBorderlessFullscreen(window: Window, enabled: Boolean) {
 }
 
 internal fun applyNativeCompactPlayerWindow(window: Window, enabled: Boolean) {
+    if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+        LinuxCompactWindowChrome.setCompact(window, enabled)
+        return
+    }
     if (DesktopHostOs.current != DesktopHostOs.WINDOWS || !window.isShowing) return
 
     runCatching {

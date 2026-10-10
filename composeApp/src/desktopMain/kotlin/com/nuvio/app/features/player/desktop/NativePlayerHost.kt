@@ -5,6 +5,13 @@ import java.awt.Color
 import java.awt.Graphics
 
 internal class NativePlayerHost : Canvas() {
+    // Linux-only hooks; the PiP coordinator owns activation and window movement.
+    var linuxPiPInteractive = false
+        set(value) { if (field != value) { field = value; onLinuxPiPInteractiveChanged?.invoke(value) } }
+    var onLinuxPiPInteractiveChanged: ((Boolean) -> Unit)? = null
+    var onLinuxPiPCancelGesture: (() -> Unit)? = null
+    var onLinuxPiPMove: ((java.awt.Point) -> Unit)? = null
+    var onLinuxPiPFullscreen: (() -> Unit)? = null
     var onPeerReady: (() -> Unit)? = null
     var onDisplayableChanged: ((Boolean) -> Unit)? = null
     var onFirstPaint: (() -> Unit)? = null

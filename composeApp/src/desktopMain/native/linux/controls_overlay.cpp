@@ -1,4 +1,8 @@
 #include "controls_overlay.h"
+#include "pip_hud_visibility.h"
+#include "pip_hud_geometry.h"
+#include "pip_geometry_dispatch.h"
+#include "window_chrome.h"
 
 #include <gtk/gtk.h>
 #include <gdk/gdkx.h>
@@ -29,6 +33,11 @@ public:
     static void syncIfStarted(std::function<void()> action) {
         if (auto *thread = started_.load()) thread->sync(std::move(action));
         else action(); // Do not initialize GTK for an audio-only/no-HUD player.
+    }
+
+    static bool postIfStarted(std::function<void()> action) {
+        if (auto *thread = started_.load()) { thread->post(std::move(action)); return true; }
+        return false;
     }
 
     void post(std::function<void()> action) {
@@ -104,6 +113,10 @@ std::string jsString(const std::string &value) {
 }
 }
 
+void postOnLinuxGtkThread(std::function<void()> action) {
+    GtkThread::postIfStarted(std::move(action));
+}
+
 struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
     // Inbox only is shared with JNI callers; all other fields belong to GTK.
     std::mutex inbox;
@@ -121,14 +134,29 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
     GCancellable *evaluation = nullptr;
     guint timer = 0;
     bool ready = false;
+    PiPHudVisibility pipHudVisibility;
+    std::atomic<bool> pipHudSuppressed{false};
     double controlsUiScaleFactor = 1.0; // Transient; the shared snapshot owns the preference.
     bool hostWindowFocused = false; // GTK thread only; start hidden until AWT supplies focus.
     int x = 0, y = 0, width = 0, height = 0, lastScale = 0;
     Message message;
     Snapshot snapshot;
 
+    bool overlayGeometry(HudGeometry &geometry) {
+        if (!window || !gtk_widget_get_realized(window)) return false;
+        Display *connection = gdk_x11_display_get_xdisplay(display);
+        Window xid = gdk_x11_window_get_xid(gtk_widget_get_window(window)), child = None;
+        XWindowAttributes attributes{};
+        gdk_x11_display_error_trap_push(display);
+        const bool found = XGetWindowAttributes(connection, xid, &attributes) &&
+            XTranslateCoordinates(connection, xid, attributes.root, 0, 0, &geometry.x, &geometry.y, &child);
+        const int error = gdk_x11_display_error_trap_pop(display);
+        geometry.width = attributes.width; geometry.height = attributes.height;
+        return found && !error;
+    }
+
     void evaluate(const std::string &script) {
-        if (!view || closing) return;
+        if (!view || closing || !pipHudVisibility.normalWorkAllowed()) return;
         // JNI has no return value. Discard Promise/complex results, which WebKit
         // cannot serialize, without hiding actual script exceptions.
         std::string command = script + "\n;void 0;";
@@ -152,7 +180,7 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
         {
             std::lock_guard<std::mutex> lock(inbox);
             deliveryPosted = false;
-            if (!ready || closing) return;
+            if (!ready || closing || !pipHudVisibility.normalWorkAllowed()) return;
             json = latestJson;
             pending.swap(scripts);
             scriptBytes = 0;
@@ -189,6 +217,7 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
             return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
                 (ch >= '0' && ch <= '9') || ch == '_';
         })) return;
+        if (self.pipHudVisibility.suppressed() && name != "controlsReady") return;
         // Visibility/clearance updates can arrive often; log user actions, not frame traffic.
         if (name != "cursorVisibility" && name != "hudSubtitleClearance" &&
             name != "scrubChange" && name != "seekThumbnail")
@@ -232,25 +261,34 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
             webkit_web_view_set_zoom_level(view, zoom);
     }
 
-    bool layout(bool force = false) {
+    bool layout(bool force = false, bool geometryOnly = false,
+                const HudGeometry *expected = nullptr, const std::function<bool()> &current = [] { return true; }) {
         if (!window || !host || closing) return false;
-        applyControlsZoom(); // Refresh the baseline when GDK's monitor scale changes.
+        if (!geometryOnly && !pipHudVisibility.normalWorkAllowed()) return true;
+        if (!geometryOnly) applyControlsZoom(); // No WebKit work in the one-shot PiP path.
         XWindowAttributes attributes{};
         int rootX = 0, rootY = 0;
         if (!hostGeometry(attributes, rootX, rootY)) return false;
+        const HudGeometry desired{rootX, rootY, attributes.width, attributes.height};
+        HudGeometry actual;
+        const bool known = geometryOnly && overlayGeometry(actual);
+        if (geometryOnly) {
+            if (!current() || !expected || !(desired == *expected) || !known) return false;
+            if (desired == actual) return true;
+        }
         // Override-redirect bypasses WM stacking: a viewable Canvas alone does
         // not mean Nuvio is foreground. Only AWT's owning-window focus maps HUD.
-        if (!hostWindowFocused || attributes.map_state != IsViewable) {
+        const bool canShow = hostWindowFocused && attributes.map_state == IsViewable;
+        if (!canShow && !geometryOnly) {
             gtk_widget_hide(window);
             return true;
         }
         int scale = std::max(1, gtk_widget_get_scale_factor(window));
         // X coordinates are physical pixels; GTK/GDK geometry uses logical pixels.
-        int gx = static_cast<int>(std::floor(static_cast<double>(rootX) / scale));
-        int gy = static_cast<int>(std::floor(static_cast<double>(rootY) / scale));
-        int w = std::max(1, (attributes.width + scale - 1) / scale);
-        int h = std::max(1, (attributes.height + scale - 1) / scale);
+        const auto logical = logicalHudGeometry(desired, scale);
+        const int gx = logical.x, gy = logical.y, w = logical.width, h = logical.height;
         GdkWindow *native = gtk_widget_get_window(window);
+        if (geometryOnly && !current()) return false;
         gdk_x11_display_error_trap_push(display);
         if (force || rootX != x || rootY != y || attributes.width != width ||
             attributes.height != height || scale != lastScale || !gtk_widget_get_visible(window)) {
@@ -261,12 +299,12 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
             gtk_window_resize(GTK_WINDOW(window), w, h);
             gdk_window_move_resize(native, gx, gy, w, h);
         }
-        if (!gtk_widget_get_visible(window)) gtk_widget_show_all(window);
+        if (!geometryOnly && canShow && !gtk_widget_get_visible(window)) gtk_widget_show_all(window);
         // Preserve exact physical bounds even when root coordinates/sizes are not
         // divisible by GDK's scale. These requests target only our own toplevel.
         XMoveResizeWindow(gdk_x11_display_get_xdisplay(display), gdk_x11_window_get_xid(native),
             rootX, rootY, attributes.width, attributes.height);
-        gdk_window_raise(native);
+        if (!geometryOnly && canShow) gdk_window_raise(native);
         int error = gdk_x11_display_error_trap_pop(display);
         if (error) {
             std::fprintf(stderr, "Linux controls: overlay geometry update failed\n");
@@ -276,7 +314,7 @@ struct LinuxControlsOverlay::State : std::enable_shared_from_this<State> {
     }
 
     void syncPlayback() {
-        if (!ready || closing || !snapshot) return;
+        if (!ready || closing || !snapshot || !pipHudVisibility.normalWorkAllowed()) return;
         std::string state = snapshot();
         if (!state.empty()) evaluate("window.playerUpdate(" + state + ")");
     }
@@ -408,11 +446,123 @@ std::unique_ptr<LinuxControlsOverlay> LinuxControlsOverlay::create(
     GtkThread::get().sync([state, drawable, url] {
         try { state->create(drawable, url); }
         catch (...) { state->destroy(); throw; }
+        geometryState_ = state;
     });
     return std::unique_ptr<LinuxControlsOverlay>(new LinuxControlsOverlay(std::move(state)));
 }
 
 LinuxControlsOverlay::~LinuxControlsOverlay() { close(); }
+
+std::weak_ptr<LinuxControlsOverlay::State> LinuxControlsOverlay::geometryState_;
+
+namespace {
+std::atomic<uint64_t> pipSequence{0}, pipSession{0};
+struct PiPGeometrySample { bool valid = false; HudGeometry canvas, overlay; };
+auto currentPiPSession(uint64_t session) {
+    return [session] { return session && pipSession.load() == session; };
+}
+auto postPiP = [](std::function<void()> action) { GtkThread::postIfStarted(std::move(action)); };
+}
+
+uint64_t LinuxControlsOverlay::beginPiPGeometry() {
+    const auto session = ++pipSequence;
+    pipSession = session;
+    return session;
+}
+void LinuxControlsOverlay::cancelPiPGeometry(uint64_t session) {
+    pipSession.compare_exchange_strong(session, 0);
+}
+bool LinuxControlsOverlay::pipWindowTask(std::function<bool()> query) {
+    return dispatchPiPGeometry<bool>(postPiP, [] { return true; },
+        [query](auto) { return query(); }).value_or(false);
+}
+
+bool LinuxControlsOverlay::setPiPHudSuppressed(uint64_t session, bool suppressed) {
+    return dispatchPiPGeometry<bool>(postPiP, currentPiPSession(session), [suppressed](auto current) {
+        auto state = geometryState_.lock();
+        if (!state || state->closing || !state->window || !current()) return false;
+        if (state->pipHudVisibility.suppressed() == suppressed) return true;
+        XWindowAttributes canvas{};
+        int rootX = 0, rootY = 0;
+        if (!suppressed) {
+            HudGeometry overlay;
+            if (!state->hostGeometry(canvas, rootX, rootY) || !state->overlayGeometry(overlay) ||
+                !(overlay == HudGeometry{rootX, rootY, canvas.width, canvas.height})) return false;
+        }
+        state->pipHudVisibility.setSuppressed(suppressed);
+        state->pipHudSuppressed = suppressed;
+        if (suppressed) {
+            {
+                std::lock_guard<std::mutex> lock(state->inbox);
+                state->scripts.clear(); state->scriptBytes = 0;
+            }
+            gtk_widget_hide(state->window);
+            // Subtitle rendering remains in mpv; hidden chrome reserves no subtitle clearance.
+            if (state->message) state->message("hudSubtitleClearance", 0);
+        } else {
+            // Latest controls JSON is retained; transient UI scripts are discarded while hidden.
+            state->deliver();
+            // The Compose payload may still be queued on the EDT. Never expose compact chrome.
+            state->evaluate("window.playerControls({pictureInPictureActive:false})");
+            state->syncPlayback();
+            state->applyControlsZoom();
+            // Geometry was aligned while hidden and verified again above. No second resize.
+            if (state->hostWindowFocused && canvas.map_state == IsViewable) {
+                gtk_widget_show_all(state->window);
+                gdk_window_raise(gtk_widget_get_window(state->window));
+            }
+        }
+        gdk_display_flush(state->display);
+        return true;
+    }).value_or(false);
+}
+
+bool LinuxControlsOverlay::canvasGeometry(uint64_t session, uint64_t canvas, HudGeometry &geometry) {
+    auto result = dispatchPiPGeometry<PiPGeometrySample>(postPiP, currentPiPSession(session), [canvas](auto) {
+        PiPGeometrySample sample;
+        auto state = geometryState_.lock();
+        if (!state || state->closing || state->host != canvas) return sample;
+        XWindowAttributes attributes{};
+        sample.valid = state->hostGeometry(attributes, sample.canvas.x, sample.canvas.y) && attributes.map_state == IsViewable;
+        sample.canvas.width = attributes.width; sample.canvas.height = attributes.height;
+        return sample;
+    });
+    if (!result || !result->valid) return false;
+    geometry = result->canvas;
+    return true;
+}
+
+PiPHudRequest LinuxControlsOverlay::syncGeometry(uint64_t session, uint64_t canvas, const HudGeometry &expected, int64_t remainingNanos) {
+    return dispatchPiPGeometry<PiPHudRequest>(postPiP, currentPiPSession(session), [canvas, expected](auto current) {
+        auto state = geometryState_.lock();
+        if (!state || state->closing || state->host != canvas) return PiPHudRequest::Failed;
+        return requestPiPHudGeometry(expected, [&](HudGeometry &geometry) {
+            XWindowAttributes attributes{};
+            const bool valid = state->hostGeometry(attributes, geometry.x, geometry.y);
+            geometry.width = attributes.width; geometry.height = attributes.height;
+            return valid && attributes.map_state == IsViewable;
+        }, [&] { return state->layout(true, true, &expected, current); },
+        [&](HudGeometry &geometry) { return state->overlayGeometry(geometry); }, current);
+    }, std::chrono::nanoseconds(std::clamp<int64_t>(remainingNanos, 0, 100'000'000))).value_or(PiPHudRequest::Failed);
+}
+
+bool LinuxControlsOverlay::observeGeometry(uint64_t session, uint64_t canvas, HudGeometry &host, HudGeometry &overlay) {
+    auto result = dispatchPiPGeometry<PiPGeometrySample>(postPiP, currentPiPSession(session), [canvas](auto) {
+        PiPGeometrySample sample;
+        auto state = geometryState_.lock();
+        if (!state || state->closing || state->host != canvas) return sample;
+        XWindowAttributes attributes{};
+        sample.valid = readPiPHudGeometry([&](HudGeometry &host) {
+            const bool valid = state->hostGeometry(attributes, host.x, host.y) && attributes.map_state == IsViewable;
+            host.width = attributes.width; host.height = attributes.height;
+            return valid;
+        }, [&](HudGeometry &overlay) { return state->overlayGeometry(overlay); }, sample.canvas, sample.overlay);
+        return sample;
+    });
+    if (!result || !result->valid) return false;
+    host = result->canvas; overlay = result->overlay;
+    return true;
+}
 
 void LinuxControlsOverlay::updateControls(const std::string &json) {
     std::lock_guard<std::mutex> lock(state_->inbox);
@@ -423,7 +573,7 @@ void LinuxControlsOverlay::updateControls(const std::string &json) {
 
 void LinuxControlsOverlay::runJavaScript(const std::string &script) {
     std::lock_guard<std::mutex> lock(state_->inbox);
-    if (state_->closing) return;
+    if (state_->closing || state_->pipHudSuppressed) return;
     if (state_->scripts.size() >= 32 || script.size() > 1024 * 1024 - state_->scriptBytes)
         throw std::runtime_error("Linux controls startup script queue is full.");
     state_->scripts.push_back(script);
@@ -462,6 +612,7 @@ void LinuxControlsOverlay::setWindowFocused(bool focused) {
     GtkThread::get().post([self = state_, focused] {
         if (self->closing || !self->window) return;
         self->hostWindowFocused = focused;
+        if (self->pipHudVisibility.suppressed()) return;
         if (!focused) gtk_widget_hide(self->window);
         else if (!self->layout(true)) self->destroy();
         gdk_display_flush(self->display);

@@ -1411,9 +1411,13 @@ kotlin {
 
 // Two input tests need a real focused window (see GamepadInjectionRouteTest). Focus is global, so
 // they briefly steal keystrokes from whatever the developer is typing into. They are therefore
-// opt-in: run them with `-Pnuvio.focusTests` before shipping input changes, and on CI where nobody
+// opt-in: run them with `NUVIO_RUN_LIVE_DISPLAY_TESTS=1` and `-Pnuvio.focusTests` on an explicitly
+// requested test display before shipping input changes, and on CI where nobody
 // is at the keyboard.
+val runLiveDisplayTests = providers.environmentVariable("NUVIO_RUN_LIVE_DISPLAY_TESTS")
+    .map { it == "1" }.orElse(false)
 tasks.withType<Test>().configureEach {
+    inputs.property("runLiveDisplayTests", runLiveDisplayTests)
     systemProperty(
         "nuvio.focusTests",
         (providers.gradleProperty("nuvio.focusTests").orNull ?: "false").ifBlank { "true" },
@@ -1427,6 +1431,12 @@ tasks.withType<Test>().configureEach {
     providers.gradleProperty("nuvio.engineEnv").orNull?.split(';')?.forEach { pair ->
         val (k, v) = pair.split('=', limit = 2).let { it[0] to it.getOrElse(1) { "1" } }
         environment(k, v)
+    }
+    // Native-smoke/focus flags do not authorize access to the developer's desktop. Keep
+    // offscreen Compose/raster and ordinary unit tests available without an X11 connection.
+    if (isLinuxHost && !runLiveDisplayTests.get()) {
+        systemProperty("java.awt.headless", "true")
+        setEnvironment(environment.filterKeys { it != "DISPLAY" && it != "WAYLAND_DISPLAY" })
     }
 }
 

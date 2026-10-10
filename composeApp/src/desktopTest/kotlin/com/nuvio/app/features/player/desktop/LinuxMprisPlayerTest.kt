@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player.desktop
 
+import com.nuvio.app.LiveDisplayTests
 import com.nuvio.app.features.player.PlayerControlsState
 import java.awt.Frame
 import java.nio.file.Files
@@ -11,6 +12,9 @@ import kotlin.test.*
 
 /** Real integrated libmpv + controller action paths, controlled over an isolated session bus. */
 class LinuxMprisPlayerTest {
+    @org.junit.Before
+    fun requireLiveDisplay() = LiveDisplayTests.assumeEnabled()
+
     private class Fixture : AutoCloseable {
         val daemon = ProcessBuilder("dbus-daemon", "--session", "--nofork", "--print-address=1").start()
         val address = daemon.inputStream.bufferedReader().readLine()

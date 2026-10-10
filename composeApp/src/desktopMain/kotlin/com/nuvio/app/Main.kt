@@ -63,6 +63,9 @@ import com.nuvio.app.features.player.desktop.DesktopWindowGeometry
 import com.nuvio.app.features.player.desktop.DesktopWindowMinHeight
 import com.nuvio.app.features.player.desktop.DesktopWindowMinWidth
 import com.nuvio.app.features.player.desktop.DesktopWindowGeometryDiagnostics
+import com.nuvio.app.features.player.desktop.DesktopPictureInPictureRestore
+import com.nuvio.app.features.player.desktop.LinuxPictureInPictureAwtWindow
+import com.nuvio.app.features.player.desktop.LinuxPictureInPictureTransition
 import com.nuvio.app.features.player.desktop.DesktopWindowModeStorage
 import com.nuvio.app.features.player.desktop.applyNativeBorderlessFullscreen
 import com.nuvio.app.features.player.desktop.applyNativeDesktopWindowChrome
@@ -303,14 +306,6 @@ private data class DesktopWindowGeometrySample(
         )
     }
 }
-
-private data class DesktopPictureInPictureRestore(
-    val bounds: Rectangle,
-    val placement: WindowPlacement,
-    val extendedState: Int,
-    val alwaysOnTop: Boolean,
-    val borderlessFullscreen: Boolean,
-)
 
 // Session-scoped (lives until the client process exits) memory of the last Picture-in-Picture
 // window bounds. Re-entering PiP restores wherever the user last moved/sized the window instead of
@@ -576,6 +571,7 @@ fun main() {
             // window reports an off-screen origin on Windows, so those states are excluded outright.
             // collectLatest then swallows the intermediate rects reported while a transition is
             // still settling — only the rect that survives the delay reaches storage.
+            val linuxPictureInPictureOwnsGeometry = remember(window) { mutableStateOf(false) }
             LaunchedEffect(window, windowState) {
                 snapshotFlow {
                     DesktopWindowGeometrySample(
@@ -584,7 +580,7 @@ fun main() {
                         position = windowState.position,
                         size = windowState.size,
                         borderlessFullscreen = isBorderlessFullscreen.value,
-                        pictureInPicture = desktopPictureInPictureState.value,
+                        pictureInPicture = desktopPictureInPictureState.value || linuxPictureInPictureOwnsGeometry.value,
                     )
                 }
                     .distinctUntilChanged()
@@ -604,8 +600,34 @@ fun main() {
                     isBorderlessFullscreen.value && !desktopPictureInPictureState.value
                 }
                 var pictureInPictureRestore: DesktopPictureInPictureRestore? = null
+                var exitLinuxPiPToFullscreen: () -> Unit = {}
+                val linuxPictureInPicture = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+                    LinuxPictureInPictureTransition(
+                        window = LinuxPictureInPictureAwtWindow(window, windowState) { exitLinuxPiPToFullscreen() },
+                        pictureInPictureBounds = { pictureInPictureBounds(window) },
+                        rememberBounds = { lastPictureInPictureBounds = Rectangle(it) },
+                        fullscreenChanged = { desktopAppFullscreenState.value = it },
+                        geometryOwned = { linuxPictureInPictureOwnsGeometry.value = it },
+                        rejected = { setDesktopPictureInPicture(false, window) },
+                        isActive = { desktopPictureInPictureState.value },
+                    )
+                } else null
+                exitLinuxPiPToFullscreen = {
+                    if (desktopPictureInPictureState.value) {
+                        linuxPictureInPicture?.requestExitToFullscreen()
+                        setDesktopPictureInPicture(false, window)
+                    }
+                }
+                val pictureInPictureWindowListener = object : java.awt.event.WindowAdapter() {
+                    override fun windowClosed(event: WindowEvent) { linuxPictureInPicture?.close() }
+                }
+                if (linuxPictureInPicture != null) window.addWindowListener(pictureInPictureWindowListener)
                 val unregisterPictureInPicture = registerDesktopPictureInPictureHandler { active, targetWindow ->
                     if (targetWindow != null && targetWindow !== window) return@registerDesktopPictureInPictureHandler
+                    if (linuxPictureInPicture != null) {
+                        linuxPictureInPicture.setActive(active)
+                        return@registerDesktopPictureInPictureHandler
+                    }
                     if (active) {
                         if (pictureInPictureRestore != null) return@registerDesktopPictureInPictureHandler
                         pictureInPictureRestore = DesktopPictureInPictureRestore(
@@ -748,6 +770,8 @@ fun main() {
                     AWTEvent.MOUSE_EVENT_MASK,
                 )
                 onDispose {
+                    linuxPictureInPicture?.close()
+                    window.removeWindowListener(pictureInPictureWindowListener)
                     uninstallScreensaver()
                     GamepadInput.stop()
                     DesktopNavigationGestureBridge.setHorizontalScrollModifierActive(false)

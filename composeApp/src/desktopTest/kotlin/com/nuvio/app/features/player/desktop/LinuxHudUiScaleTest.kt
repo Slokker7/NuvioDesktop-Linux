@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player.desktop
 
+import com.nuvio.app.LiveDisplayTests
 import com.nuvio.app.features.player.PlayerControlsState
 import com.nuvio.app.features.player.PlayerControlsAction
 import com.nuvio.app.features.player.PlayerSettingsRepository
@@ -19,6 +20,9 @@ import kotlin.test.assertTrue
 
 /** Uses the shipped HUD and real WebKit viewport, without native diagnostic hooks. */
 class LinuxHudUiScaleTest {
+    @org.junit.Before
+    fun requireLiveDisplay() = LiveDisplayTests.assumeEnabled()
+
     private fun enabled(): Boolean {
         val enabled = DesktopHostOs.current == DesktopHostOs.LINUX &&
             System.getProperty("nuvio.linux.nativeSmokeTest") == "true"

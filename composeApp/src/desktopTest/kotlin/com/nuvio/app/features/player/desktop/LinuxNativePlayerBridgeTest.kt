@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player.desktop
 
+import com.nuvio.app.LiveDisplayTests
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
@@ -10,7 +11,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.awt.Canvas
 import java.awt.Frame
-import java.awt.GraphicsEnvironment
 import java.awt.event.WindowEvent
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -38,7 +38,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun customMpvOptionsRespectModesAndQuotedValues() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-config-options-")
         val source = directory.resolve("video.y4m")
         val report = directory.resolve("options.json")
@@ -88,7 +89,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun customMpvModesPreserveEmbeddingAndPlaybackRequirements() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-config-embedding-")
         val source = directory.resolve("video.y4m")
         val report = directory.resolve("options.json")
@@ -139,7 +141,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun controllerConfigModeChangesApplyBeforeLoadAndDoNotLeakAcrossSources() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-config-controller-")
         val source = directory.resolve("video.y4m")
         val replacement = directory.resolve("replacement.y4m")
@@ -238,7 +241,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun realChaptersPreserveSchemaPrecisionAndTitlesAndQueriesCanRaceClose() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-chapters-")
         val source = directory.resolve("chapters.mkv")
         val host = NativePlayerHost()
@@ -315,7 +319,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun liveChapterPropertyHandlesMissingMalformedTitlesAndPreservesMpvOrder() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-chapter-property-")
         val source = directory.resolve("video.mkv")
         val script = directory.resolve("replace-chapters.lua")
@@ -363,7 +368,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun controllerReplacementClearsChaptersAndStatsAndExistingHudConsumesChapters() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-chapter-replacement-")
         val chaptered = directory.resolve("chapters.mkv")
         val unchaptered = directory.resolve("no-chapters.mkv")
@@ -471,7 +477,8 @@ class LinuxNativePlayerBridgeTest {
     }
 
     private fun statsToggle(support: Boolean) {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-stats-")
         val source = directory.resolve("video.y4m")
         val observer = LinuxStatsObserver(directory)
@@ -550,7 +557,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun mainPlayerStartsVulkanX11DespiteConflictingCustomRendererOptions() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-renderer-")
         val source = directory.resolve("video.y4m")
         val mpvLog = directory.resolve("mpv.log")
@@ -590,7 +598,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun mainPlayerHardwareDecodeDefaultPreservesExplicitOverrides() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-hwdec-policy-")
         val source = directory.resolve("video.y4m")
         val report = directory.resolve("options.json")
@@ -656,7 +665,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun replacementUnpublishesBeforeTeardownAndUiCommandsCannotTargetOutgoingPlayer() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val source = Files.createTempFile("nuvio-linux-replacement-", ".y4m")
         val host = NativePlayerHost()
         val controller = NativePlayerController(host)
@@ -730,7 +740,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun nativeX11ReservationRejectsAnotherControllerUntilFullDisposal() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val source = Files.createTempFile("nuvio-linux-x11-owner-", ".y4m")
         val hostA = NativePlayerHost()
         val hostB = NativePlayerHost()
@@ -811,7 +822,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun partialInitializationFailureReleasesNativeX11Reservation() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val source = Files.createTempFile("nuvio-linux-partial-init-", ".wav")
         val host = NativePlayerHost()
         var frame: Frame? = null
@@ -842,7 +854,8 @@ class LinuxNativePlayerBridgeTest {
     }
 
     private fun videoShutdownBeforePeerRemoval(replaceBeforeClose: Boolean) {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val source = Files.createTempFile("nuvio-linux-shutdown-", ".y4m")
         val host = NativePlayerHost()
         val controller = NativePlayerController(host)
@@ -914,11 +927,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun x11CanvasSupportsRealMpvLifecycleAndCommands() {
+        LiveDisplayTests.assumeEnabled()
         if (!enabled()) return
-        if (GraphicsEnvironment.isHeadless()) {
-            println("SKIPPED: no display; real JAWT Canvas test requires X11/XWayland.")
-            return
-        }
         // Audio-only local fixture exercises the lifecycle without claiming Nuvio video works.
         // The temporary window cannot take focus; the audio output is null and opens no device.
         val source = Files.createTempFile("nuvio-linux-🟦-", ".wav")
@@ -1029,7 +1039,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun multipleAudioTracksReachHudAndSelectionAndReplacementUseLiveTrackIds() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-audio-tracks-")
         val source = directory.resolve("two-tracks.mka")
         val single = directory.resolve("single.wav")
@@ -1185,8 +1196,81 @@ class LinuxNativePlayerBridgeTest {
     }
 
     @Test
+    fun liveCompactChromeKeepsCanvasPlayerAndWebView() {
+        LiveDisplayTests.assumeEnabled()
+        org.junit.Assume.assumeTrue(enabled())
+        NativePlayerBridge.ensureNativeLibraryLoaded()
+        assertEquals(0L, LinuxWindowChromeNative.begin(0))
+        assertEquals(0L, LinuxWindowChromeNative.begin(Long.MAX_VALUE))
+        val source = Files.createTempFile("nuvio-linux-compact-chrome-", ".y4m")
+        val host = NativePlayerHost()
+        val controller = NativePlayerController(host)
+        val restart = CountDownLatch(1)
+        val restarts = java.util.concurrent.atomic.AtomicInteger()
+        val replies = LinkedBlockingQueue<Int>()
+        val error = AtomicReference<String?>(null)
+        val handleField = NativePlayerController::class.java.getDeclaredField("handle").apply { isAccessible = true }
+        val entriesField = LinuxCompactWindowChrome::class.java.getDeclaredField("entries").apply { isAccessible = true }
+        var frame: Frame? = null
+        var drawable = 0L
+        try {
+            writeLocalVideo(source)
+            SwingUtilities.invokeAndWait {
+                frame = videoFrame(host)
+                drawable = LinuxAwtViewResolver.resolveNativeViewPointer(host)
+                controller.setControlCallbacks({ false }, { type, value ->
+                    if (type == "playbackRestart") { restarts.incrementAndGet(); restart.countDown() }
+                    if (type == "chromeProbe") replies.add(value.toInt())
+                    false
+                }, { false }, { false })
+                attachLocalVideo(controller, source, error)
+            }
+            assertTrue(restart.await(20, TimeUnit.SECONDS), "No initial video frame: ${error.get()}")
+            await { handleField.getLong(controller) != 0L }
+            val handle = handleField.getLong(controller)
+            assertTrue(LinuxWindowChromeNative.end(Long.MAX_VALUE, 0))
+            val initialRestarts = restarts.get()
+            NativePlayerBridge.runJavaScript(handle, "window.chromeProbeMarker = 42")
+            repeat(4) {
+                for (compact in listOf(true, true, false, false)) {
+                    SwingUtilities.invokeAndWait {
+                        val owner = requireNotNull(frame)
+                        applyNativeCompactPlayerWindow(owner, compact) // Actual platform dispatch.
+                        val entries = entriesField.get(null) as Map<*, *>
+                        assertEquals(compact, entries.containsKey(owner), "Linux chrome adapter was not selected/successful")
+                        assertEquals(drawable, LinuxAwtViewResolver.resolveNativeViewPointer(host), "Canvas drawable changed")
+                        if (compact) assertTrue(LinuxWindowChromeNative.begin(drawable) != 0L,
+                            "Canvas ancestry did not resolve the already active managed client")
+                    }
+                    NativePlayerBridge.runJavaScript(handle, """
+                        window.webkit.messageHandlers.player.postMessage({type:'chromeProbe',value:window.chromeProbeMarker || -1});
+                    """.trimIndent())
+                    assertEquals(42, replies.poll(10, TimeUnit.SECONDS), "WebView was replaced or stopped responding")
+                    assertEquals(handle, handleField.getLong(controller), "Player instance changed")
+                    assertEquals(initialRestarts, restarts.get(), "Unexpected playback restart")
+                    assertTrue(NativePlayerBridge.isPaused(handle))
+                }
+            }
+            // Active disposal abandons saved state after peer removal, without stale-XID requests.
+            SwingUtilities.invokeAndWait {
+                applyNativeCompactPlayerWindow(requireNotNull(frame), true)
+                controller.dispose()
+                frame?.dispose()
+            }
+            SwingUtilities.invokeAndWait { // WindowClosed is queued by AWT.
+                assertFalse((entriesField.get(null) as Map<*, *>).containsKey(frame), "Disposed window retained chrome state")
+            }
+            assertEquals(0L, LinuxWindowChromeNative.begin(drawable), "Destroyed Canvas unexpectedly resolved")
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose(); frame?.dispose() }
+            Files.deleteIfExists(source)
+        }
+    }
+
+    @Test
     fun windowFocusEventsHideAndRestoreHudWithoutReplacingPlayer() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val source = Files.createTempFile("nuvio-linux-hud-focus-", ".y4m")
         val host = NativePlayerHost()
         val controller = NativePlayerController(host)
@@ -1257,11 +1341,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun x11WebKitOverlayLoadsSiblingAssetsAndDeliversQueuedMessages() {
+        LiveDisplayTests.assumeEnabled()
         if (!enabled()) return
-        if (GraphicsEnvironment.isHeadless()) {
-            println("SKIPPED: no display; WebKit overlay test requires X11/XWayland.")
-            return
-        }
         // A tiny local fixture tests the native transport, not the full HUD or video compositing.
         val directory = Files.createTempDirectory("nuvio-webkit-🟦-")
         val source = directory.resolve("silent.wav")
@@ -1414,7 +1495,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun seekThumbnailsReachHudWithoutSeekingPlaybackAndSurviveReplacementAndPendingDisposal() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val directory = Files.createTempDirectory("nuvio-linux-seek-preview-")
         val first = directory.resolve("first.y4m")
         val second = directory.resolve("second.y4m")
@@ -1807,7 +1889,8 @@ class LinuxNativePlayerBridgeTest {
 
     @Test
     fun slowThumbnailLoadRecoversOnTheSameNativePlayer() {
-        if (!enabled() || GraphicsEnvironment.isHeadless()) return
+        LiveDisplayTests.assumeEnabled()
+        if (!enabled()) return
         val source = Files.createTempFile("nuvio-linux-thumbnail-http-", ".y4m")
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val stalled = java.util.concurrent.atomic.AtomicBoolean(false)

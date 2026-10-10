@@ -1,5 +1,6 @@
 package com.nuvio.app.features.screensaver
 
+import com.nuvio.app.LiveDisplayTests
 import com.nuvio.app.features.player.desktop.LinuxPlayerWindowFocus
 import com.nuvio.app.features.player.desktop.NativePlayerHost
 import javax.swing.JFrame
@@ -119,6 +120,7 @@ class LinuxScreensaverTest {
             0, 0, 0, false, MouseWheelEvent.WHEEL_UNIT_SCROLL, 1, 1), resting))
     }
     @Test fun ownedShadeFollowsMoveResizeAndFullscreenBoundsAndDisposesTracker() {
+        LiveDisplayTests.assumeEnabled()
         SwingUtilities.invokeAndWait {
             val owner = Frame()
             val before = owner.componentListeners.size
@@ -140,6 +142,7 @@ class LinuxScreensaverTest {
         }
     }
     @Test fun shadeSuppressesHudAndRestoresOnlyWhileOwnerFocused() {
+        LiveDisplayTests.assumeEnabled()
         SwingUtilities.invokeAndWait {
             var foreground = true
             val owner = object : JFrame() { override fun isFocused() = foreground }

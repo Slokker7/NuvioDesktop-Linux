@@ -1,5 +1,6 @@
 package com.nuvio.app.features.screensaver
 
+import com.nuvio.app.LiveDisplayTests
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import java.awt.Frame
 import java.awt.Toolkit
@@ -10,6 +11,7 @@ import kotlin.test.assertEquals
 class LinuxScreensaverInstallTest {
     @Test
     fun linuxInstallsAndRemovesInputWatch() {
+        LiveDisplayTests.assumeEnabled()
         if (DesktopHostOs.current != DesktopHostOs.LINUX) return
         SwingUtilities.invokeAndWait {
             val window = Frame()

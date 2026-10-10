@@ -111,6 +111,8 @@ Before finishing a task:
 
 If a task uncovers a larger architectural issue, stop and explain it before performing a broad rewrite.
 
+Never run live X11/XWayland/Compose/GTK/WebKit window tests against the user's active desktop session unless explicitly requested. Default automated validation must use non-display unit tests and native fixtures. Live window tests require `NUVIO_RUN_LIVE_DISPLAY_TESTS=1`; native-smoke or focus-test flags alone do not authorize them.
+
 ## External references
 
 Other Linux implementations or upstream Nuvio repositories may be studied as references.
