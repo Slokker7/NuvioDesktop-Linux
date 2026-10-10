@@ -150,9 +150,10 @@ object StreamTraitDetector {
             audioTags = streamAudioTags(parsed?.audio.orEmpty(), searchText),
             audioChannels = streamAudioChannels(parsed?.channels.orEmpty(), searchText),
             encode = streamEncode(parsed?.codec, searchText),
-            languages = parsed?.languages.orEmpty().mapNotNull { languageFor(it) }.ifEmpty {
-                DebridStreamLanguage.entries.filter { searchText.hasToken(it.code) }
-            },
+            languages = (parsed?.languages.orEmpty() + stream.audioLanguages)
+                .mapNotNull { languageFor(it) }.distinct().ifEmpty {
+                    DebridStreamLanguage.entries.filter { searchText.hasToken(it.code) }
+                },
             releaseGroup = group,
             size = streamSize(stream),
             durationSeconds = durationSeconds(parsed?.duration),
