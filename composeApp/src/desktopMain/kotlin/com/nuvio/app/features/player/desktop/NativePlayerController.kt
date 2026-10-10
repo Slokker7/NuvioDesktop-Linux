@@ -83,6 +83,7 @@ internal const val TRAILER_AUDIO_NORMALIZATION_FILTER = "dynaudnorm=f=150:g=15"
 
 internal class NativePlayerController(
     private val host: NativePlayerHost,
+    private val linuxHeroSurface: Boolean = false,
     private val linuxMprisOwner: () -> LinuxMprisSession = { LinuxMediaSession.owner },
 ) : PlayerEngineController {
     init {
@@ -109,6 +110,7 @@ internal class NativePlayerController(
         // for its replacement can therefore crash inside libvapoursynth.dll. Keep native player
         // creation and destruction process-wide serial while still doing both off the UI thread.
         val nativeProcessLifecycleLock = Any()
+        val linuxOwnership = LinuxPlayerOwnership(nativeProcessLifecycleLock)
 
         // Last volume the user set on the main player, as a 0..maxVolumeFraction value. Persisted
         // across native player instances (in memory, for the app session) so that starting a new
@@ -124,10 +126,18 @@ internal class NativePlayerController(
     @Volatile
     private var lastResizeMode: PlayerResizeMode? = null
     private val handleLock = Any()
+    private var linuxHandleSourceUrl: String? = null // Guarded by handleLock.
     private val linuxPendingDisposalHandles = mutableListOf<Long>() // Guarded by handleLock.
     private val attachGeneration = AtomicLong(0L)
     @Volatile
     private var disposed = false
+    @Volatile
+    private var linuxHeroActive = false
+    @Volatile
+    private var linuxHeroResumePosition: Pair<String, Long>? = null
+    private val linuxHeroGeometry = LinuxHeroHostGeometry.install(DesktopHostOs.current, linuxHeroSurface, host) {
+        attachPending()
+    }
     private val linuxWindowFocus = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
         LinuxPlayerWindowFocus(host) { focused ->
             handle.takeIf { !disposed && it != 0L }?.let {
@@ -174,6 +184,7 @@ internal class NativePlayerController(
     @Volatile
     var rateLimitFailoverFallback: ((String) -> Boolean)? = null
     private var linuxMpris: LinuxMprisPlayer? = null
+    @Volatile
     private var controlsState = PlayerControlsState()
     private var lastSentControlsStructureKey: PlayerControlsState? = null
     private var lastSentMediaSessionKey: String? = null
@@ -323,11 +334,25 @@ internal class NativePlayerController(
     private fun attachPending() {
         if (disposed) return
         val pending = pendingSource ?: return
+        val linux = DesktopHostOs.current == DesktopHostOs.LINUX
+        if (linux && linuxHeroSurface && !linuxHeroActive) return
+        if (linuxHeroGeometry?.canAttach() == false) return
+        val ownership = if (linux) {
+            linuxOwnership.request(
+                this,
+                if (linuxHeroSurface) LinuxPlayerOwnership.Priority.HERO else LinuxPlayerOwnership.Priority.PLAYER,
+            ) ?: return
+        } else null
         val generation = attachGeneration.incrementAndGet()
+        fun current(): Boolean = !disposed && generation == attachGeneration.get() &&
+            (linuxHeroGeometry == null || (linuxHeroGeometry.ready && pendingSource === pending)) &&
+            (ownership == null || linuxOwnership.isCurrent(ownership))
         SwingUtilities.invokeLater {
-            if (disposed || !host.isDisplayable) {
+            if (disposed || !host.isDisplayable || (linux && !current())) {
                 return@invokeLater
             }
+            // Swing interop may have changed bounds since the request was queued.
+            if (linuxHeroGeometry?.canAttach() == false) return@invokeLater
             val hostViewPtr = if (DesktopHostOs.current == DesktopHostOs.LINUX) {
                 runCatching { AwtNativeViewResolver.resolveNativeViewPointer(host) }.getOrElse { error ->
                     pending.onError(error.message)
@@ -336,6 +361,7 @@ internal class NativePlayerController(
             } else {
                 AwtNativeViewResolver.resolveNativeViewPointer(host)
             }
+            if (linux) linuxOwnership.prepare(ownership!!)
             linuxMpris?.sourceChanging(handle)
             // Stop UI commands targeting the outgoing player on the EDT, but retain
             // its native lifetime separately so Linux peer removal cannot miss it.
@@ -349,8 +375,20 @@ internal class NativePlayerController(
             lastSentMpvMediaTitle = null
             thread(isDaemon = true, name = "Nuvio-Player-Attach") {
                 synchronized(nativeProcessLifecycleLock) {
-                    if (DesktopHostOs.current == DesktopHostOs.LINUX &&
-                        (disposed || generation != attachGeneration.get())) return@synchronized
+                    if (linux) {
+                        val claimed = runCatching {
+                            linuxOwnership.claim(
+                                ownership!!,
+                                quiesce = ::prepareLinuxOwnershipRelease,
+                                stillEligible = ::current,
+                                release = ::releaseLinuxOwnership,
+                            )
+                        }.getOrElse { error ->
+                            SwingUtilities.invokeLater { if (current()) pending.onError(error.message) }
+                            return@synchronized
+                        }
+                        if (!claimed) return@synchronized
+                    }
                     // Replacement is intentionally sequential. Both operations remain on this
                     // worker, so a slow native shutdown delays the next stream without freezing
                     // Compose or allowing shared mpv dependencies to tear down under a new player.
@@ -366,7 +404,7 @@ internal class NativePlayerController(
                         runCatching { NativePlayerBridge.dispose(previousHandle) }
                     }
                     if (pending.tracePlaybackStart) PlaybackStartTrace.mark("nativeAttachThread")
-                    if (disposed || generation != attachGeneration.get()) {
+                    if (!current()) {
                         return@synchronized
                     }
                     var newHandle = 0L
@@ -375,7 +413,10 @@ internal class NativePlayerController(
                     // otherwise arrive after a replacement has attached and mutate the new session.
                     val generationEventSink = NativePlayerEventSink { type, value ->
                         SwingUtilities.invokeLater {
-                            if (!disposed && generation == attachGeneration.get()) {
+                            // An incoming request may be cancelled before handoff. The still-live
+                            // owner keeps its events; cancelled creates and evicted owners do not.
+                            val liveOwner = linux && handle != 0L && linuxOwnership.owns(ownership!!)
+                            if (!disposed && generation == attachGeneration.get() && (current() || liveOwner)) {
                                 handlePlayerEvent(type, value)
                             }
                         }
@@ -394,15 +435,18 @@ internal class NativePlayerController(
                             nvidiaRtxHdrEnabled = pending.nvidiaRtxHdrEnabled,
                             isAnimeContent = pending.isAnimeContent,
                             animeSvpFilter = pending.animeSvpFilter,
-                            extraMpvOptions = pending.extraMpvOptions.toTypedArray(),
+                            extraMpvOptions = (pending.extraMpvOptions +
+                                if (linux && linuxHeroSurface) linuxHeroStartupAudioOptions(controlsState)
+                                else emptyList()).toTypedArray(),
                             eventSink = generationEventSink,
                         )
                         if (newHandle == 0L) error("Native player did not return a handle.")
                     }
                     result.onFailure { error ->
-                        if (!disposed && generation == attachGeneration.get()) {
+                        if (linux) linuxOwnership.forget(this)
+                        if (current()) {
                             SwingUtilities.invokeLater {
-                                if (!disposed && generation == attachGeneration.get()) {
+                                if (current()) {
                                     pending.onError(error.message)
                                 }
                             }
@@ -410,20 +454,23 @@ internal class NativePlayerController(
                         return@synchronized
                     }
                     val keepHandle = synchronized(handleLock) {
-                        if (disposed || generation != attachGeneration.get()) {
+                        if (!current()) {
                             false
                         } else {
                             handle = newHandle
+                            if (linux) linuxHandleSourceUrl = pending.sourceUrl
                             diagnosticsOverlayEnabled = false
                             true
                         }
                     }
                     if (!keepHandle) {
                         NativePlayerBridge.dispose(newHandle)
+                        if (linux) linuxOwnership.forget(this)
                         return@synchronized
                     }
                     if (DesktopHostOs.current == DesktopHostOs.LINUX) SwingUtilities.invokeLater {
                         if (!disposed && generation == attachGeneration.get() && handle == newHandle) {
+                            linuxHeroGeometry?.attached()
                             LinuxPlayerControlsBridge.setWindowFocused(newHandle, linuxWindowFocus?.focused == true)
                         }
                     }
@@ -454,6 +501,58 @@ internal class NativePlayerController(
         }
     }
 
+    /** A retained/paused hero keeps its shared state, but no Linux native lifetime. */
+    fun setLinuxHeroActive(active: Boolean) {
+        if (DesktopHostOs.current != DesktopHostOs.LINUX || !linuxHeroSurface || disposed || linuxHeroActive == active) return
+        linuxHeroActive = active
+        pendingSource = pendingSource?.let { pending ->
+            val resume = linuxHeroResumePosition?.takeIf { active && it.first == pending.sourceUrl }
+            pending.copy(playWhenReady = active, initialPositionMs = resume?.second ?: pending.initialPositionMs)
+        }
+        if (active) {
+            if (host.isDisplayable) attachPending()
+        } else {
+            linuxHeroGeometry?.cancel()
+            linuxOwnership.cancel(this)
+            attachGeneration.incrementAndGet()
+            retainLinuxHeroPosition()
+            disposePlayerHandle()
+        }
+    }
+
+    // Called on the EDT before the incoming native worker starts. Existing UI commands
+    // finish before unpublishing; no native lifecycle lock is held here.
+    private fun prepareLinuxOwnershipRelease() {
+        check(SwingUtilities.isEventDispatchThread())
+        linuxOwnership.cancel(this)
+        attachGeneration.incrementAndGet()
+        // A late peer-ready/source callback must not re-request an evicted hero.
+        // Only a fresh foreground eligibility transition may activate it again.
+        linuxHeroActive = false
+        linuxHeroGeometry?.cancel()
+        retainLinuxHeroPosition()
+        unpublishLinuxPlayerHandle()
+    }
+
+    // Native-only drain on the incoming worker under nativeProcessLifecycleLock.
+    // The retained controller survives and this never calls/waits for the EDT.
+    private fun releaseLinuxOwnership() {
+        drainLinuxPendingDisposals()
+        meteredPrefetchFrozen = false
+    }
+
+    private fun retainLinuxHeroPosition() {
+        if (!linuxHeroSurface) return
+        val (current, source) = synchronized(handleLock) { handle to linuxHandleSourceUrl }
+        if (current == 0L) return
+        val position = runCatching {
+            NativePlayerBridge.positionMs(current).takeIf { it > 0L && !NativePlayerBridge.isEnded(current) }
+        }.getOrNull() ?: return
+        // Keep the saved position separate from source selection; apply it only when
+        // the retained surface resumes the matching trailer.
+        if (source != null) linuxHeroResumePosition = source to position
+    }
+
     private fun takePlayerHandle(): Long = synchronized(handleLock) {
         val value = handle
         handle = 0L
@@ -463,6 +562,7 @@ internal class NativePlayerController(
     private fun unpublishLinuxPlayerHandle() = synchronized(handleLock) {
         if (handle != 0L) linuxPendingDisposalHandles.add(handle)
         handle = 0L
+        linuxHandleSourceUrl = null
     }
 
     // Caller owns nativeProcessLifecycleLock, including throughout native teardown.
@@ -1277,10 +1377,12 @@ internal class NativePlayerController(
 
     fun dispose() {
         disposed = true
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) linuxOwnership.cancel(this)
         linuxMpris?.close()
         linuxMpris = null
         linuxPiPInput?.close()
         linuxWindowFocus?.close()
+        linuxHeroGeometry?.close()
         attachGeneration.incrementAndGet()
         pendingSource = null
         host.onPeerReady = null
@@ -1370,6 +1472,7 @@ internal class NativePlayerController(
                 // must also be included before the Canvas peer can disappear.
                 unpublishLinuxPlayerHandle()
                 drainLinuxPendingDisposals()
+                linuxOwnership.forget(this)
             }
             0L
         } else {

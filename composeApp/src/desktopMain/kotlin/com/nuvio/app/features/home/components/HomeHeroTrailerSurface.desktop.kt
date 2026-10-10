@@ -26,6 +26,8 @@ import com.nuvio.app.features.player.PlayerControlsState
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.NativePlayerController
 import com.nuvio.app.features.player.desktop.NativePlayerHost
+import com.nuvio.app.features.player.desktop.linuxHeroPlayWhenReady
+import com.nuvio.app.features.player.desktop.heroTrailerHostUsesFullBounds
 import com.nuvio.app.features.player.desktop.TRAILER_AUDIO_NORMALIZATION_FILTER
 import kotlinx.coroutines.delay
 
@@ -38,8 +40,8 @@ private val trailerSurfaceLog = Logger.withTag("HomeHeroTrailerSurface")
  * overlay into hero-trailer mode so it renders only the fade gradients over the video.
  *
  * The SwingPanel is heavyweight, so Compose cannot fade it with alpha; instead the panel is
- * kept at 1px until mpv reports its first paint (mirroring the full-screen player) so there
- * is no black flash before the trailer has a frame.
+ * kept at 1px until playback advances on Windows/macOS. Linux, like the full-screen player,
+ * allocates its active Canvas before playback readiness so mpv can initialize at real bounds.
  */
 @Composable
 actual fun HomeHeroTrailerSurface(
@@ -64,7 +66,8 @@ actual fun HomeHeroTrailerSurface(
     onSurfaceDisposed: () -> Unit,
 ) {
     val supported = DesktopHostOs.current == DesktopHostOs.WINDOWS ||
-        DesktopHostOs.current == DesktopHostOs.MACOS
+        DesktopHostOs.current == DesktopHostOs.MACOS || DesktopHostOs.current == DesktopHostOs.LINUX
+    val effectivePlayWhenReady = linuxHeroPlayWhenReady(playWhenReady, home = true)
     val latestOnError = rememberUpdatedState(onError)
     val latestOnReady = rememberUpdatedState(onReady)
     val latestOnEnded = rememberUpdatedState(onEnded)
@@ -90,7 +93,7 @@ actual fun HomeHeroTrailerSurface(
             focusTraversalKeysEnabled = false
         }
     }
-    val controller = remember(host) { NativePlayerController(host) }
+    val controller = remember(host) { NativePlayerController(host, linuxHeroSurface = true) }
     val backgroundHex = remember(backgroundColor) { backgroundColor.toHeroTrailerHex() }
     var firstPaintComplete by remember { mutableStateOf(false) }
     var playbackRevealReady by remember { mutableStateOf(false) }
@@ -247,11 +250,14 @@ actual fun HomeHeroTrailerSurface(
         controller.setMpvProperty("af", TRAILER_AUDIO_NORMALIZATION_FILTER)
     }
 
-    LaunchedEffect(controller, playWhenReady) {
-        if (playWhenReady) controller.play() else controller.pause()
+    LaunchedEffect(controller, effectivePlayWhenReady, sourceUrl.takeIf { DesktopHostOs.current == DesktopHostOs.LINUX }) {
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            controller.setLinuxHeroActive(effectivePlayWhenReady)
+            if (!effectivePlayWhenReady) playbackRevealReady = false
+        } else if (playWhenReady) controller.play() else controller.pause()
     }
 
-    LaunchedEffect(controller, sourceUrl, playWhenReady) {
+    LaunchedEffect(controller, sourceUrl, effectivePlayWhenReady) {
         var endedReported = false
         var readyReported = false
         while (true) {
@@ -260,7 +266,7 @@ actual fun HomeHeroTrailerSurface(
             // Reveal only once playback is genuinely advancing, keeping the artwork visible
             // through that otherwise noticeable frozen-frame interval.
             if (
-                playWhenReady &&
+                effectivePlayWhenReady &&
                 firstPaintComplete &&
                 !readyReported &&
                 snapshot.isPlaying &&
@@ -285,7 +291,7 @@ actual fun HomeHeroTrailerSurface(
         CompositionLocalProvider(LocalDensity provides LocalNuvioBaseDensity.current) {
             SwingPanel(
                 factory = { host },
-                modifier = if (playbackRevealReady && playWhenReady) {
+                modifier = if (heroTrailerHostUsesFullBounds(DesktopHostOs.current, playbackRevealReady, effectivePlayWhenReady)) {
                     Modifier.fillMaxSize()
                 } else {
                     Modifier.align(Alignment.BottomEnd).requiredSize(1.dp)

@@ -25,6 +25,8 @@ import com.nuvio.app.features.player.PlayerControlsState
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.NativePlayerController
 import com.nuvio.app.features.player.desktop.NativePlayerHost
+import com.nuvio.app.features.player.desktop.linuxHeroPlayWhenReady
+import com.nuvio.app.features.player.desktop.heroTrailerHostUsesFullBounds
 import com.nuvio.app.features.player.desktop.TRAILER_AUDIO_NORMALIZATION_FILTER
 import kotlinx.coroutines.delay
 
@@ -47,7 +49,8 @@ actual fun HeroTrailerPlayerSurface(
     onReclaimFocus: () -> Unit,
 ) {
     val supported = DesktopHostOs.current == DesktopHostOs.WINDOWS ||
-        DesktopHostOs.current == DesktopHostOs.MACOS
+        DesktopHostOs.current == DesktopHostOs.MACOS || DesktopHostOs.current == DesktopHostOs.LINUX
+    val effectivePlayWhenReady = linuxHeroPlayWhenReady(playWhenReady)
     val latestOnReady = rememberUpdatedState(onReady)
     val latestOnEnded = rememberUpdatedState(onEnded)
     val latestOnError = rememberUpdatedState(onError)
@@ -71,7 +74,7 @@ actual fun HeroTrailerPlayerSurface(
             focusTraversalKeysEnabled = false
         }
     }
-    val controller = remember(host) { NativePlayerController(host) }
+    val controller = remember(host) { NativePlayerController(host, linuxHeroSurface = true) }
     var firstPaintComplete by remember { mutableStateOf(false) }
     // Sticky: stays true once this host has painted at all. onFirstPaint only fires for a
     // host's very first paint, so a re-attach (e.g. clicking a trailer, which pauses/shrinks
@@ -209,17 +212,20 @@ actual fun HeroTrailerPlayerSurface(
         controller.setMpvProperty("af", TRAILER_AUDIO_NORMALIZATION_FILTER)
     }
 
-    LaunchedEffect(controller, playWhenReady) {
-        if (playWhenReady) controller.play() else controller.pause()
+    LaunchedEffect(controller, effectivePlayWhenReady, sourceUrl.takeIf { DesktopHostOs.current == DesktopHostOs.LINUX }) {
+        if (DesktopHostOs.current == DesktopHostOs.LINUX) {
+            controller.setLinuxHeroActive(effectivePlayWhenReady)
+            if (!effectivePlayWhenReady) playbackRevealReady = false
+        } else if (playWhenReady) controller.play() else controller.pause()
     }
 
-    LaunchedEffect(controller, sourceUrl, playWhenReady) {
+    LaunchedEffect(controller, sourceUrl, effectivePlayWhenReady) {
         var readyReported = false
         var endedReported = false
         while (true) {
             val snapshot = controller.snapshot()
             if (
-                playWhenReady &&
+                effectivePlayWhenReady &&
                 (firstPaintComplete || hasPaintedOnce) &&
                 !readyReported &&
                 snapshot.isPlaying &&
@@ -241,7 +247,7 @@ actual fun HeroTrailerPlayerSurface(
         CompositionLocalProvider(LocalDensity provides LocalNuvioBaseDensity.current) {
             SwingPanel(
                 factory = { host },
-                modifier = if (playbackRevealReady && playWhenReady) {
+                modifier = if (heroTrailerHostUsesFullBounds(DesktopHostOs.current, playbackRevealReady, effectivePlayWhenReady)) {
                     Modifier.fillMaxSize()
                 } else {
                     Modifier.align(Alignment.BottomEnd).requiredSize(1.dp)

@@ -50,7 +50,8 @@ and its thumbnail probe checks the helper's effective software-only options.
 - `create`, `dispose`: mpv initialization, source loading, partial-failure cleanup,
   idempotent disposal, and opaque handles protected against commands racing disposal.
 - HTTP headers: native mpv string array preserves commas inside individual values.
-- Separate audio: `audio-files-append` preserves an entire URL as one entry.
+- Separate audio: `audio-files` is set before initialization as a native one-entry
+  array, preserving the entire URL without CLI list parsing.
 - Autoplay/pause and resume: initial `pause`, absolute `start` in seconds, or percentage
   `start` when no absolute position is supplied.
 - `setPaused`, `seekTo`, `seekBy`, `setSpeed`, `speed`.

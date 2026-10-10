@@ -548,10 +548,12 @@ future work. No DEB/AppImage/Flatpak or release workflow is implemented here.
 
 ## Separate existing-player follow-up
 
-`mpv_set_option_string("audio-files-append", ...)` returns option-not-found with
-both the existing Homebrew and private libmpv. This correction does not change
-that pre-existing separate-audio-URL integration issue or weaken acceptance for
-it. Native Wayland, JVM namespace isolation, hybrid/AMD/Intel hardware testing,
+`audio-files-append` is CLI/config syntax and returns option-not-found through
+libmpv's option API. The Linux bridge now sets `audio-files` as a native one-entry
+array before initialization. The maintainer retested the previously failing YouTube
+trailer: integrated video, separate audio and seeking passed. This does not establish
+universal YouTube/provider reliability.
+Native Wayland, JVM namespace isolation, hybrid/AMD/Intel hardware testing,
 package dependency closure and replacement of the builder baseline remain
 separate work. The safety backport introduces no `dlmopen`, renderer or lifecycle
 change; the Linux main-player policy remains `hwdec=auto`.

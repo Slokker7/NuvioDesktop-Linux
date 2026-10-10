@@ -4,6 +4,7 @@
 #include "controls_overlay.h"
 #include "awt_x11_lifecycle.h"
 #include "seek_thumbnails.h"
+#include "separate_audio.h"
 
 #include <algorithm>
 #include <atomic>
@@ -791,7 +792,7 @@ JNI_METHOD(jlong, create)(
         auto headers = strings(env, headerLines);
         headerOptions(player->mpv, headers);
         std::string audio = text(env, sourceAudioUrl);
-        if (!audio.empty()) option(player->mpv, "audio-files-append", audio);
+        checkMpv(setLinuxSeparateAudio(player->mpv, audio), "audio-files");
         checkMpv(mpv_initialize(player->mpv), "mpv_initialize");
         checkMpv(mpv_observe_property(player->mpv, 1, "video-params", MPV_FORMAT_NODE), "observe video-params");
         const char *load[] = {"loadfile", source.c_str(), nullptr};

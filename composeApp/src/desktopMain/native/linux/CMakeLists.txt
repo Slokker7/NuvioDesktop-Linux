@@ -69,6 +69,14 @@ target_link_libraries(linux_seek_thumbnail_probe PRIVATE Threads::Threads "${MPV
 target_link_options(linux_seek_thumbnail_probe PRIVATE "LINKER:--wrap=mpv_initialize")
 set_target_properties(linux_seek_thumbnail_probe PROPERTIES BUILD_RPATH "${MPV_LIBRARY_DIR}")
 
+# Real-libmpv separate-audio regression probe: null outputs, no display/GTK/JNI.
+add_executable(linux_separate_audio_test EXCLUDE_FROM_ALL tests/separate_audio_test.cpp)
+target_compile_features(linux_separate_audio_test PRIVATE cxx_std_17)
+target_compile_options(linux_separate_audio_test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(linux_separate_audio_test PRIVATE "${MPV_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(linux_separate_audio_test PRIVATE "${MPV_LIBRARY}")
+set_target_properties(linux_separate_audio_test PROPERTIES BUILD_RPATH "${MPV_LIBRARY_DIR}")
+
 # Deterministic chrome policy fixtures; no display, WM, mpv or JNI initialization.
 add_executable(linux_pip_geometry_dispatch_test EXCLUDE_FROM_ALL tests/pip_geometry_dispatch_test.cpp)
 target_compile_features(linux_pip_geometry_dispatch_test PRIVATE cxx_std_17)
