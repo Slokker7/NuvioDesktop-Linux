@@ -235,6 +235,7 @@ class LinuxPlaybackInhibitorTest {
     /** Opt-in acceptance observer for the available GNOME session; never changes power settings. */
     @Test
     fun sharedScreenAwakeEffectOwnsARealSessionInhibitor() {
+        com.nuvio.app.LiveDisplayTests.assumeEnabled()
         if (DesktopHostOs.current != DesktopHostOs.LINUX ||
             System.getProperty("nuvio.linux.nativeSmokeTest") != "true") return
         fun call(path: String, method: String): String {

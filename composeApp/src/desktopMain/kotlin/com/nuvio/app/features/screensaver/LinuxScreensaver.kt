@@ -1,5 +1,6 @@
 package com.nuvio.app.features.screensaver
 
+import com.nuvio.app.features.input.GamepadInput
 import com.nuvio.app.features.player.desktop.LinuxPlayerWindowFocus
 
 import java.awt.AWTEvent
@@ -30,6 +31,7 @@ internal class LinuxScreensaverController(
     private val hide: () -> Unit,
     private val disposeShade: () -> Unit,
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val gamepadIdle: () -> Long? = { null },
 ) : AutoCloseable {
     private var lastActivity = clock()
     private var closed = false
@@ -44,8 +46,12 @@ internal class LinuxScreensaverController(
         if (closed) return
         val now = clock()
         val sessionIdle = runCatching { idle.idleMs() }.getOrNull()?.takeIf { it >= 0 }
-        // Remember observed native activity even if the service disappears on the next tick.
-        if (sessionIdle != null) lastActivity = maxOf(lastActivity, now - sessionIdle)
+        val padIdle = gamepadIdle()?.takeIf { it >= 0 }
+        // Controllers are absent from the session clock, and OSK-consumed input may
+        // never reach AWT. Preserve either observed activity across backend loss.
+        for (observedIdle in listOfNotNull(sessionIdle, padIdle)) {
+            lastActivity = maxOf(lastActivity, now - observedIdle)
+        }
         val idleMs = (now - lastActivity).coerceAtLeast(0)
         if (settings.enabled && windowShowing && (!playerActive || settings.activeDuringPlayback) &&
             idleMs >= settings.dimDelayMinutes(playerActive) * 60_000L
@@ -67,6 +73,7 @@ internal object LinuxScreensaver {
         var closed = false
         val controller = LinuxScreensaverController(
             idle = LinuxSessionIdleSource(),
+            gamepadIdle = GamepadInput::idleMs,
             show = { opacity ->
                 val overlay = shade ?: createShade(window).also { created ->
                     shade = created

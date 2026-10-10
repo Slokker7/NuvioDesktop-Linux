@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include "dbus_connection.h"
 #ifdef NUVIO_HAVE_XSS
 #include <dlfcn.h>
 #include <X11/Xlib.h>
@@ -23,7 +24,10 @@ struct IdleProbe {
     XScreenSaverInfo* info = nullptr;
 #endif
     ~IdleProbe() {
-        if (bus) g_object_unref(bus);
+        if (bus) {
+            g_dbus_connection_close_sync(bus, nullptr, nullptr);
+            g_object_unref(bus);
+        }
 #ifdef NUVIO_HAVE_XSS
         if (info) XFree(info);
         if (display) XCloseDisplay(display);
@@ -90,9 +94,9 @@ Java_com_nuvio_app_features_screensaver_LinuxIdleNative_open(JNIEnv*, jobject) {
     // Do not auto-launch a session bus in headless/dev environments.
     if (g_getenv("DBUS_SESSION_BUS_ADDRESS")) {
         GError* error = nullptr;
-        probe->bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+        // Private connection: disposal cannot affect another GIO session-bus user.
+        probe->bus = nuvio::dbus::connect(G_BUS_TYPE_SESSION, 1500, &error);
         if (error) g_error_free(error);
-        if (probe->bus) g_dbus_connection_set_exit_on_close(probe->bus, FALSE);
     }
     return reinterpret_cast<jlong>(probe);
 }

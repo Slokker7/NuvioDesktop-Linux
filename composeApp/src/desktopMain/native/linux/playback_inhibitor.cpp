@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include "dbus_connection.h"
 
 namespace {
 constexpr int timeoutMs = 1500;
@@ -32,15 +33,8 @@ Variant call(GDBusConnection *bus, const char *name, const char *path, const cha
 
 GDBusConnection *connectBus(GBusType type) {
     GError *error = nullptr;
-    gchar *address = g_dbus_address_get_for_bus_sync(type, nullptr, &error);
-    if (!address) { g_clear_error(&error); throw std::runtime_error("D-Bus unavailable"); }
-    auto *bus = g_dbus_connection_new_for_address_sync(address,
-        static_cast<GDBusConnectionFlags>(G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
-                                         G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
-        nullptr, nullptr, &error);
-    g_free(address);
+    auto *bus = nuvio::dbus::connect(type, timeoutMs, &error);
     if (!bus) { g_clear_error(&error); throw std::runtime_error("D-Bus connection failed"); }
-    g_dbus_connection_set_exit_on_close(bus, false);
     return bus;
 }
 

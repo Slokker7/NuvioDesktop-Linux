@@ -3,10 +3,53 @@
 Requires PyGObject and dbus-daemon; never connects to or changes the real desktop bus.
 """
 import os
+import socket
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 from gi.repository import Gio, GLib
+
+for key in ('DISPLAY', 'WAYLAND_DISPLAY', 'NUVIO_RUN_LIVE_DISPLAY_TESTS'):
+    os.environ.pop(key, None)
+
+# Stall authentication on a private socket. Exercise both the production idle
+# open/query/close path (two opens) and the helper used by playback inhibition.
+for args, expected, connections in [([], ['-1'] * 4, 2), (['--connection'], ['unavailable'], 1)]:
+    with tempfile.TemporaryDirectory(prefix='nuvio-idle-auth-') as directory:
+        address = directory + '/bus'
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(address)
+        server.listen()
+        server.settimeout(0.1)
+        stop = threading.Event()
+        accepted = []
+        def stall():
+            while not stop.is_set():
+                try:
+                    connection, _ = server.accept()
+                    accepted.append(connection)  # Never reply; close only after the client returns.
+                except socket.timeout:
+                    pass
+        stalled = threading.Thread(target=stall)
+        stalled.start()
+        try:
+            start = time.monotonic()
+            result = subprocess.run([sys.argv[1], *args], text=True, capture_output=True, check=True,
+                timeout=connections * 1.5 + 2,
+                env=dict(os.environ, DBUS_SESSION_BUS_ADDRESS='unix:path=' + address, XDG_SESSION_TYPE='wayland'))
+            elapsed = time.monotonic() - start
+            assert result.stdout.split() == expected, result
+            assert len(accepted) == connections, len(accepted)
+            assert connections * 1.3 <= elapsed < connections * 1.5 + 2, elapsed
+            print(f'PASS authentication timeout {args or "idle lifecycle"}: {elapsed:.2f}s', flush=True)
+        finally:
+            stop.set()
+            stalled.join(timeout=5)
+            for connection in accepted:
+                connection.close()
+            server.close()
 
 SAVER = 'org.freedesktop.ScreenSaver'
 MUTTER = 'org.gnome.Mutter.IdleMonitor'
@@ -48,7 +91,11 @@ try:
                 for path, interface in [('/org/freedesktop/ScreenSaver', info.interfaces[0]),
                     ('/ScreenSaver', info.interfaces[0]), ('/org/gnome/Mutter/IdleMonitor/Core', info.interfaces[1])]:
                     bus.register_object(path, interface, method, None, None)
-            env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=address, XDG_SESSION_TYPE='wayland', WAYLAND_DISPLAY='test')
+            env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=address, XDG_SESSION_TYPE='wayland')
+            if mode == 'standard':
+                connected = subprocess.run([sys.argv[1], '--connection'], env=env, text=True,
+                    capture_output=True, timeout=5, check=True)
+                assert connected.stdout.strip() == 'connected', connected
             if mode == 'busloss':
                 process = subprocess.Popen([sys.argv[1], '--interactive'], env=env, text=True,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

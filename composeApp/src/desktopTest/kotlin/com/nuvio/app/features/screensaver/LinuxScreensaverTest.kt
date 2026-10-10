@@ -26,6 +26,7 @@ class LinuxScreensaverTest {
     private class Fixture {
         var now = 0L
         var nativeIdle: Long? = null
+        var padIdle: Long? = null
         var visible = false
         var opacity = 0f
         var disposed = 0
@@ -35,7 +36,7 @@ class LinuxScreensaverTest {
         val controller = LinuxScreensaverController(object : LinuxIdleSource {
             override fun idleMs() = nativeIdle
             override fun close() { closed++ }
-        }, { visible = true; opacity = it }, { visible = false }, { disposed++; visible = false }, { now })
+        }, { visible = true; opacity = it }, { visible = false }, { disposed++; visible = false }, { now }, { padIdle })
         fun tick(player: Boolean = false, showing: Boolean = true, config: ScreensaverSettings = settings) =
             controller.tick(config, player, showing)
     }
@@ -72,6 +73,27 @@ class LinuxScreensaverTest {
         now = 120_000; nativeIdle = 120_000; tick(); assertTrue(visible)
         nativeIdle = 0; tick(); assertFalse(visible)
         nativeIdle = 120_000; controller.activity(); tick(); assertFalse(visible)
+    }
+    @Test fun controllerActivityConsumedBeforeAwtDismissesAndResetsIdle() = with(Fixture()) {
+        now = 60_000; nativeIdle = now; tick(); assertTrue(visible)
+        padIdle = 0; tick(); assertFalse(visible)
+        // No AWT activity() call: OSK input only updates the controller clock.
+        now = 119_999; nativeIdle = now; padIdle = 59_999; tick(); assertFalse(visible)
+        now = 120_000; nativeIdle = now; padIdle = 60_000; tick(); assertTrue(visible)
+    }
+    @Test fun controllerActivitySurvivesDisconnectAndMissingSessionProbe() = with(Fixture()) {
+        now = 120_000; tick(player = true); assertTrue(visible)
+        padIdle = 0; tick(player = true); assertFalse(visible)
+        padIdle = null
+        now = 239_999; tick(player = true); assertFalse(visible)
+        now = 240_000; tick(player = true); assertTrue(visible)
+    }
+    @Test fun oldOrInvalidControllerSampleCannotOverrideNewerAppOrSessionInput() = with(Fixture()) {
+        now = 60_000; padIdle = -1; tick(); assertTrue(visible)
+        padIdle = 60_000; nativeIdle = 0; tick(); assertFalse(visible)
+        nativeIdle = null; now = 119_999; tick(); assertFalse(visible)
+        controller.activity(); padIdle = 999_999; now = 179_998; tick(); assertFalse(visible)
+        now = 179_999; tick(); assertTrue(visible)
     }
     @Test fun missingOrInvalidBackendFallsBack() = with(Fixture()) {
         now = 60_000; nativeIdle = -1; tick(); assertTrue(visible)
